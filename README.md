@@ -139,5 +139,8 @@ Projekt używa **XTTS v2** (Coqui TTS):
 Ten projekt używa modelu XTTS v2 z Coqui TTS, który jest dostępny na licencji Mozilla Public License 2.0.
 
 ## Autorzy
+Projekt stworzony na bazie zadania z kursu Developer Jutra autorstwa [Tomasza Ducina](https://developerjutra.pl/)
 
-Projekt stworzony z pomocą Claude (Anthropic).
+Opracowanie: [Aga Czyżewska](czyzewska.pro)
+
+Projekt stworzony z pomocą Claude. 
