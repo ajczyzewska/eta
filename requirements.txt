@@ -1,0 +1,20 @@
+# EPUB to Audiobook - Dependencies
+# Generowanie audiobooka z plików EPUB
+
+# TTS (Text-to-Speech)
+TTS>=0.22.0
+
+# EPUB processing
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Audio processing
+pydub>=0.25.1
+
+# CLI and progress bars
+rich>=13.0.0
+
+# PyTorch (for TTS model)
+torch>=2.0.0
+torchaudio>=2.0.0
