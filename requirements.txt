@@ -2,7 +2,8 @@
 # Generowanie audiobooka z plików EPUB
 
 # TTS (Text-to-Speech)
-TTS>=0.22.0
+# Note: Requires Python 3.9-3.11 (not compatible with Python 3.12+)
+TTS==0.22.0
 
 # EPUB processing
 ebooklib>=0.18
@@ -19,5 +20,13 @@ rich>=13.0.0
 psutil>=5.9.0
 
 # PyTorch (for TTS model)
-torch>=2.0.0
-torchaudio>=2.0.0
+# Using specific versions for compatibility with TTS 0.22.0
+torch==2.1.0
+torchaudio==2.1.0
+
+# Transformers (required by TTS)
+transformers==4.33.0
+
+# Web UI (optional)
+Flask>=2.2.0
+Werkzeug>=2.2.0

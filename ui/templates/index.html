@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ETa — EPUB to Audiobook (UI)</title>
+    <link rel="stylesheet" href="/ui/static/style.css">
+  </head>
+  <body>
+    <main>
+      <h1>ETa — EPUB to Audiobook (UI)</h1>
+
+      <form action="/start" method="post" enctype="multipart/form-data">
+        <label>EPUB file (required)</label>
+        <input type="file" name="epub_file" accept=".epub" required>
+
+        <label>Speaker WAV (optional)</label>
+        <input type="file" name="speaker_file" accept="audio/wav">
+
+        <label>Optimization</label>
+        <select name="optimize">
+          <option value="off">off</option>
+          <option value="auto" selected>auto</option>
+          <option value="speed">speed</option>
+          <option value="balanced">balanced</option>
+          <option value="quality">quality</option>
+        </select>
+
+        <label>Chunk size (characters)</label>
+        <input type="number" name="chunk_size" value="3000">
+
+        <label>Crossfade (ms)</label>
+        <input type="number" name="crossfade" value="100">
+
+        <label>Speed (0.5 - 2.0)</label>
+        <input type="number" step="0.1" min="0.5" max="2.0" name="speed" value="1.0">
+
+        <label><input type="checkbox" name="resume"> Resume if checkpoint exists</label>
+
+        <div class="actions">
+          <button type="submit">Start conversion</button>
+          <button type="button" id="stopBtn">Stop</button>
+        </div>
+      </form>
+
+      <section id="status">
+        <h2>Status</h2>
+        <div>
+          <strong>Output folder:</strong> <span id="output_dir">-</span>
+          <button id="openOutput" style="margin-left:8px">Open output folder</button>
+        </div>
+        <div style="margin-top:8px"><strong>Files:</strong> <span id="files">-</span></div>
+        <h3>Logs</h3>
+        <pre id="log">Loading status...</pre>
+        <h3>Checkpoint</h3>
+        <pre id="checkpoint">No checkpoint yet.</pre>
+      </section>
+    </main>
+
+    <script>
+      async function fetchStatus(){
+        try{
+          const res = await fetch('/status');
+          const json = await res.json();
+          document.getElementById('log').textContent = json.log || 'No logs yet.';
+          document.getElementById('output_dir').textContent = json.output_dir || '-';
+          document.getElementById('files').textContent = (json.files && json.files.length) ? json.files.join(', ') : '-';
+          document.getElementById('checkpoint').textContent = json.checkpoint ? JSON.stringify(json.checkpoint, null, 2) : 'No checkpoint.';
+        }catch(e){
+          document.getElementById('log').textContent = 'Error fetching status.';
+        }
+      }
+
+      document.getElementById('stopBtn').addEventListener('click', async ()=>{
+        await fetch('/stop', {method: 'POST'});
+        setTimeout(fetchStatus, 500);
+      });
+
+      document.getElementById('openOutput').addEventListener('click', async ()=>{
+        await fetch('/open_output', {method: 'POST'});
+      });
+
+      // Poll status every 2s
+      fetchStatus();
+      setInterval(fetchStatus, 2000);
+    </script>
+  </body>
+</html>
