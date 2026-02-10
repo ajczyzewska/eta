@@ -3,9 +3,10 @@
 EPUB to Audiobook Converter using XTTS v2
 
 Converts EPUB files to audiobooks with chapter separation.
-Automatically skips covers, introductions, prefaces, tables of contents, and page numbers.
+Automatically skips covers, editorial notes, publisher info, tables of contents, and page numbers.
+Keeps introductions, forewords, and prefaces as book content.
 Supports checkpoint system for resuming after interruption.
-Uses larger text chunks (3000 characters) and crossfade for smooth speech.
+Uses text chunks (~300 characters) with automatic retry/splitting for XTTS v2 Polish and crossfade for smooth speech.
 
 Usage:
     python epub_to_audiobook.py book.epub
@@ -13,7 +14,7 @@ Usage:
     python epub_to_audiobook.py book.epub --optimize auto  # auto-optimization (recommended)
     python epub_to_audiobook.py book.epub --optimize speed  # maximum speed (GPU)
     python epub_to_audiobook.py book.epub --resume  # resume from checkpoint
-    python epub_to_audiobook.py book.epub --chunk-size 5000  # larger chunks
+    python epub_to_audiobook.py book.epub --chunk-size 250  # larger chunks
     python epub_to_audiobook.py book.epub --crossfade 150  # longer crossfade
     python epub_to_audiobook.py book.epub --crossfade 0  # no crossfade
     python epub_to_audiobook.py book.epub --speed 0.75  # slower speech (75%)
@@ -28,7 +29,7 @@ import re
 import sys
 import warnings
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 import multiprocessing
 import psutil
 
@@ -38,21 +39,27 @@ from ebooklib import epub
 from pydub import AudioSegment
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-from TTS.api import TTS
+try:
+    from TTS.api import TTS
+except ImportError:
+    TTS = None
+
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 console = Console()
 
 # Configuration
-# XTTS v2 officially has a ~224 character limit, but the model handles longer texts via internal streaming
-# If you get a limit warning - check if the audio is complete
-# If audio is OK - you can ignore the warning
-CHUNK_SIZE = 3000  # Maximum characters per chunk (~30s audio for Polish)
-MIN_CHUNK_SIZE = 200  # Minimum characters
+# XTTS v2 has a hard limit of 400 tokens per inference.
+# Larger chunks may exceed this limit, but _tts_with_retry() automatically splits
+# chunks that fail, so we can safely use larger sizes for more natural speech.
+CHUNK_SIZE = 300  # Maximum characters per chunk - aggressive but safe with _tts_with_retry fallback
+MIN_CHUNK_SIZE = 10  # Minimum characters (low threshold since chunks are small)
 OUTPUT_FORMAT = "mp3"  # Output format (mp3 or wav)
 CROSSFADE_DURATION = 100  # Overlap time in ms (crossfade for smoothness)
 # Crossfade gives a much more natural effect than pauses
+
+XTTS_CHUNK_LIMIT = 220  # Safe character limit for Polish XTTS v2
 
 
 def detect_system_capabilities() -> Dict:
@@ -123,10 +130,10 @@ def get_optimization_profile(capabilities: Dict, user_optimize: str = 'auto') ->
     if user_optimize == 'speed':
         if capabilities['gpu_available']:
             profile.update({
-                'chunk_size': 5000,  # Larger chunks
+                'chunk_size': 400,  # Large chunks for speed, retry handles overflow
                 'batch_size': 1,  # TTS doesn't support batch processing natively
                 'use_gpu': True,
-                'description': 'Maximum speed (GPU, large chunks)'
+                'description': 'Maximum speed (GPU)'
             })
         else:
             console.print("[yellow]Warning: 'speed' profile requires GPU. Using 'balanced'[/yellow]")
@@ -135,7 +142,7 @@ def get_optimization_profile(capabilities: Dict, user_optimize: str = 'auto') ->
     # BALANCED profile - speed/quality balance
     if user_optimize == 'balanced':
         profile.update({
-            'chunk_size': 3000,  # Standard size
+            'chunk_size': 300,  # Standard size with retry fallback
             'batch_size': 1,
             'use_gpu': capabilities['gpu_available'],
             'description': 'Balanced (standard settings)'
@@ -144,7 +151,7 @@ def get_optimization_profile(capabilities: Dict, user_optimize: str = 'auto') ->
     # QUALITY profile - best quality (smaller chunks, smoother transitions)
     if user_optimize == 'quality':
         profile.update({
-            'chunk_size': 2000,  # Smaller chunks = smoother speech
+            'chunk_size': 200,  # Smaller chunks = smoother speech
             'batch_size': 1,
             'use_gpu': capabilities['gpu_available'],
             'description': 'Best quality (smaller chunks, smoother speech)'
@@ -156,7 +163,8 @@ def get_optimization_profile(capabilities: Dict, user_optimize: str = 'auto') ->
 def should_skip_chapter(title: str, content: str, filename: str) -> bool:
     """
     Checks if a chapter should be skipped.
-    Skips covers, introductions, prefaces, tables of contents, etc.
+    Skips covers, editorial notes, publisher info, tables of contents, etc.
+    Keeps introductions, forewords, and prefaces as part of book content.
     """
     title_lower = title.lower()
     filename_lower = filename.lower()
@@ -167,15 +175,15 @@ def should_skip_chapter(title: str, content: str, filename: str) -> bool:
         'copyright', 'rights', 'prawa autorskie',
         'dedication', 'dedykacja', 'dedykacje',
         'acknowledgment', 'podziękowania', 'podziekowania',
-        'foreword', 'przedmowa',
-        'preface', 'wstęp', 'wstep',
-        'introduction', 'wprowadzenie',
-        'table of contents', 'spis treści', 'spis tresci',
-        'contents',
         'about the author', 'o autorze',
         'about author',
         'isbn',
         'publisher', 'wydawca', 'wydawnictwo',
+        'nota redakcyjna', 'nota wydawcy', 'nota wydawnicza',
+        'od redakcji', 'od wydawcy',
+        'editorial note', 'editor\'s note',
+        'redakcja', 'korekta', 'redaction',
+        'table_of_content', 'table_of_contents', 'toc',
         'title page', 'strona tytułowa',
         'titlepage',
         'half title',
@@ -188,7 +196,7 @@ def should_skip_chapter(title: str, content: str, filename: str) -> bool:
             return True
 
     # Skip very short chapters (likely metadata)
-    if len(content) < MIN_CHUNK_SIZE * 2:  # Minimum 400 characters
+    if len(content) < 400:  # Skip very short chapters (likely metadata)
         return True
 
     # Skip if mostly page numbers (more than 30% digits)
@@ -228,6 +236,45 @@ def is_likely_chapter(title: str, content: str) -> bool:
     return False
 
 
+def _get_items_in_reading_order(book) -> list:
+    """
+    Returns EPUB document items in correct reading order.
+    Uses spine (reading order) when available and different from raw item order.
+    Falls back to get_items() order otherwise.
+    """
+    # Get all document items indexed by filename
+    items_by_name = {}
+    raw_order = []
+    for item in book.get_items():
+        if item.get_type() == ebooklib.ITEM_DOCUMENT:
+            items_by_name[item.get_name()] = item
+            raw_order.append(item.get_name())
+
+    # Try to get spine order
+    spine_order = []
+    try:
+        for item_id, _linear in book.spine:
+            try:
+                item = book.get_item_with_id(item_id)
+                if item and item.get_name() in items_by_name:
+                    spine_order.append(item.get_name())
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Use spine order if it covers the documents, otherwise fall back to raw order
+    if spine_order and set(spine_order) & set(raw_order):
+        # Spine may not list every item; append any missing items at the end
+        ordered_names = spine_order + [n for n in raw_order if n not in spine_order]
+        if ordered_names != raw_order:
+            console.print("[dim]Using EPUB spine reading order[/dim]")
+    else:
+        ordered_names = raw_order
+
+    return [items_by_name[name] for name in ordered_names if name in items_by_name]
+
+
 def extract_chapters_from_epub(epub_path: str, verbose: bool = False) -> tuple:
     """
     Extracts chapters from EPUB file.
@@ -239,14 +286,38 @@ def extract_chapters_from_epub(epub_path: str, verbose: bool = False) -> tuple:
     book = epub.read_epub(epub_path)
     all_items = []
 
-    # Collect all documents
-    for item in book.get_items():
-        if item.get_type() == ebooklib.ITEM_DOCUMENT:
+    # Collect all documents in reading order
+    for item in _get_items_in_reading_order(book):
             content = item.get_content().decode('utf-8')
+
+            # Fix drop cap initials before parsing:
+            # <span class="litera_inicjal">W</span>isława -> Wisława
+            content = re.sub(
+                r'<span[^>]*(?:inicjal|dropcap|drop.cap|lettrine)[^>]*>(\w)</span>',
+                r'\1', content, flags=re.IGNORECASE
+            )
+
             soup = BeautifulSoup(content, 'html.parser')
 
             # Remove non-content elements
             for element in soup.find_all(['script', 'style', 'nav']):
+                element.decompose()
+
+            # Remove footnote references (e.g. <sup><a href="...">[1]</a></sup>)
+            for element in soup.find_all('sup'):
+                element.decompose()
+
+            # Remove images and their captions
+            for element in soup.find_all(['figure', 'figcaption', 'img', 'svg', 'picture']):
+                element.decompose()
+            # Remove elements with caption-like CSS classes
+            caption_patterns = re.compile(
+                r'(caption|image[-_]?desc|photo[-_]?credit|ilustracja|opis[-_]?zdj|podpis)',
+                re.IGNORECASE
+            )
+            for element in soup.find_all(class_=caption_patterns):
+                element.decompose()
+            for element in soup.find_all(id=caption_patterns):
                 element.decompose()
 
             # Extract chapter title
@@ -268,6 +339,24 @@ def extract_chapters_from_epub(epub_path: str, verbose: bool = False) -> tuple:
             text = re.sub(r'\b(strona|page)\s+\d+\b', '', text, flags=re.IGNORECASE)
             text = re.sub(r'\n\s*\d+\s*\n', '\n', text)  # Standalone numbers in lines
             text = clean_text(text)  # Clean again after removing numbers
+
+            # Regex preprocessing
+            # Convert cardinal numbers to ordinals for natural TTS reading
+            text = convert_numbers_to_ordinals(text)
+
+            # Remove any remaining footnote markers like [1], [2], etc.
+            text = re.sub(r'\s*\[\d+\]\s*', ' ', text)
+            # Clean up orphaned punctuation after footnote removal
+            text = re.sub(r'(["\u201d\u201c])\s+\.', r'\1.', text)
+            text = re.sub(r'\.\s+\.', '.', text)
+            text = clean_text(text)
+
+            # Add "Cytat:" before long quotes for TTS emphasis
+            text = re.sub(
+                r'(?<=[.!?…])\s+(„[^"]{50,}?")',
+                r' Cytat: \1',
+                text
+            )
 
             all_items.append({
                 'title': title,
@@ -311,6 +400,130 @@ def extract_chapters_from_epub(epub_path: str, verbose: bool = False) -> tuple:
     return chapters, skipped
 
 
+def _polish_ordinal(n: int, gender: str = 'm') -> Optional[str]:
+    """
+    Converts an integer to Polish ordinal form.
+
+    Args:
+        n: Number to convert (1-999)
+        gender: 'm' (masculine), 'f' (feminine), 'n' (neuter)
+
+    Returns:
+        Polish ordinal string or None if number out of range.
+    """
+    if n < 1 or n > 999:
+        return None
+
+    # Base ordinals 1-19
+    _ordinals = {
+        'm': ['', 'pierwszy', 'drugi', 'trzeci', 'czwarty', 'piąty', 'szósty',
+               'siódmy', 'ósmy', 'dziewiąty', 'dziesiąty', 'jedenasty', 'dwunasty',
+               'trzynasty', 'czternasty', 'piętnasty', 'szesnasty', 'siedemnasty',
+               'osiemnasty', 'dziewiętnasty'],
+        'f': ['', 'pierwsza', 'druga', 'trzecia', 'czwarta', 'piąta', 'szósta',
+               'siódma', 'ósma', 'dziewiąta', 'dziesiąta', 'jedenasta', 'dwunasta',
+               'trzynasta', 'czternasta', 'piętnasta', 'szesnasta', 'siedemnasta',
+               'osiemnasta', 'dziewiętnasta'],
+        'n': ['', 'pierwsze', 'drugie', 'trzecie', 'czwarte', 'piąte', 'szóste',
+               'siódme', 'ósme', 'dziewiąte', 'dziesiąte', 'jedenaste', 'dwunaste',
+               'trzynaste', 'czternaste', 'piętnaste', 'szesnaste', 'siedemnaste',
+               'osiemnaste', 'dziewiętnaste'],
+    }
+
+    # Tens 20-90
+    _tens = {
+        'm': ['', '', 'dwudziesty', 'trzydziesty', 'czterdziesty', 'pięćdziesiąty',
+               'sześćdziesiąty', 'siedemdziesiąty', 'osiemdziesiąty', 'dziewięćdziesiąty'],
+        'f': ['', '', 'dwudziesta', 'trzydziesta', 'czterdziesta', 'pięćdziesiąta',
+               'sześćdziesiąta', 'siedemdziesiąta', 'osiemdziesiąta', 'dziewięćdziesiąta'],
+        'n': ['', '', 'dwudzieste', 'trzydzieste', 'czterdzieste', 'pięćdziesiąte',
+               'sześćdziesiąte', 'siedemdziesiąte', 'osiemdziesiąte', 'dziewięćdziesiąte'],
+    }
+
+    # Hundreds 100-900
+    _hundreds = {
+        'm': ['', 'setny', 'dwusetny', 'trzechsetny', 'czterechsetny', 'pięćsetny',
+               'sześćsetny', 'siedemsetny', 'osiemsetny', 'dziewięćsetny'],
+        'f': ['', 'setna', 'dwusetna', 'trzechsetna', 'czterechsetna', 'pięćsetna',
+               'sześćsetna', 'siedemsetna', 'osiemsetna', 'dziewięćsetna'],
+        'n': ['', 'setne', 'dwusetne', 'trzechsetne', 'czterechsetne', 'pięćsetne',
+               'sześćsetne', 'siedemsetne', 'osiemsetne', 'dziewięćsetne'],
+    }
+
+    g = gender if gender in _ordinals else 'm'
+    h = n // 100
+    rest = n % 100
+    t = rest // 10
+    u = rest % 10
+
+    if n < 20:
+        return _ordinals[g][n]
+
+    parts = []
+    if h > 0:
+        if rest == 0:
+            return _hundreds[g][h]
+        # For hundreds + remainder, hundreds use cardinal prefix form
+        _hundreds_cardinal = ['', 'sto', 'dwieście', 'trzysta', 'czterysta',
+                              'pięćset', 'sześćset', 'siedemset', 'osiemset', 'dziewięćset']
+        parts.append(_hundreds_cardinal[h])
+
+    if rest < 20:
+        parts.append(_ordinals[g][rest])
+    else:
+        if u == 0:
+            parts.append(_tens[g][t])
+        else:
+            # Compound ordinals like "dwudziesty pierwszy" - both parts are ordinal
+            parts.append(_tens[g][t])
+            parts.append(_ordinals[g][u])
+
+    return ' '.join(p for p in parts if p)
+
+
+def convert_numbers_to_ordinals(text: str) -> str:
+    """
+    Converts cardinal numbers after specific Polish/English keywords to ordinal forms.
+    E.g. "Rozdział 1" -> "Rozdział pierwszy", "Strona 5" -> "Strona piąta".
+
+    Handles gender agreement: masculine for rozdział/chapter, feminine for strona/część/page/part.
+    """
+    # Masculine keywords
+    masculine_keywords = r'(?:rozdział|rozdzial|chapter|tom|akt|punkt|paragraf|ustęp|artykuł|wiersz|psalm|pieśń|sonet|epizod|numer|nr)'
+    # Feminine keywords
+    feminine_keywords = r'(?:strona|część|czesc|page|part|księga|pieśń|scena|lekcja|sesja)'
+
+    def _replace_with_ordinal(match, gender):
+        keyword = match.group(1)
+        number_str = match.group(2)
+        try:
+            n = int(number_str)
+        except ValueError:
+            return match.group(0)
+        ordinal = _polish_ordinal(n, gender)
+        if ordinal:
+            return f"{keyword} {ordinal}"
+        return match.group(0)
+
+    # Replace masculine patterns
+    text = re.sub(
+        rf'\b({masculine_keywords})\s+(\d+)\b',
+        lambda m: _replace_with_ordinal(m, 'm'),
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Replace feminine patterns
+    text = re.sub(
+        rf'\b({feminine_keywords})\s+(\d+)\b',
+        lambda m: _replace_with_ordinal(m, 'f'),
+        text,
+        flags=re.IGNORECASE
+    )
+
+    return text
+
+
 def clean_text(text: str) -> str:
     """Cleans text from unnecessary characters and formatting."""
     # Remove multiple spaces and newlines
@@ -333,66 +546,75 @@ def sanitize_filename(name: str) -> str:
     return name[:50]
 
 
+
+def _split_into_sentences(text: str) -> List[str]:
+    """
+    Splits text into sentences using heuristics that avoid breaking on:
+    - Dots inside quotes/titles (e.g. „Walka. Tygodnik...")
+    - Common abbreviations (nr., im., gen., itd., itp., etc.)
+    - Initials (A. Mickiewicz)
+    - Numbers with dots (1. 2. etc.)
+
+    A sentence boundary is a dot/!/? followed by whitespace and an uppercase letter
+    or a dash (dialogue), but NOT inside quotes.
+    """
+    # First, protect text inside Polish quotes „..." from splitting
+    protected = {}
+    counter = [0]
+
+    def protect_quoted(m):
+        key = f"\x00QUOTE{counter[0]}\x00"
+        protected[key] = m.group(0)
+        counter[0] += 1
+        return key
+
+    # Protect „..." and "..." quoted strings
+    safe_text = re.sub(r'[„"][^""]*["""]', protect_quoted, text)
+
+    # Split on sentence-ending punctuation followed by space + uppercase letter or dash
+    # This avoids splitting on abbreviations (followed by lowercase) or mid-sentence dots
+    parts = re.split(r'(?<=[.!?…])\s+(?=[A-ZŻŹĆĄŚĘŁÓŃ–—(„\[])', safe_text)
+
+    # Restore protected quotes
+    sentences = []
+    for part in parts:
+        for key, val in protected.items():
+            part = part.replace(key, val)
+        part = part.strip()
+        if part:
+            sentences.append(part)
+
+    return sentences
+
+
 def split_into_chunks(text: str, max_size: int = CHUNK_SIZE) -> List[str]:
     """
-    Splits text into larger chunks for speech fluency.
-    Tries to split on paragraphs, if not possible, on sentences.
-    Similar to chunking in Whisper - we use overlapping boundaries for smoothness.
+    Splits text into sentence-based chunks for natural TTS output.
+    Each chunk is one or more complete sentences. Short consecutive sentences
+    are combined up to max_size for efficiency. Long sentences are kept whole
+    and _tts_with_retry() handles splitting if XTTS can't process them.
     """
-    # First try to split on paragraphs
-    paragraphs = text.split('\n\n')
+    sentences = _split_into_sentences(text)
     chunks = []
     current_chunk = ""
 
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
             continue
 
-        # If paragraph fits in current chunk
-        if len(current_chunk) + len(para) + 2 <= max_size:
-            if current_chunk:
-                current_chunk += "\n\n" + para
-            else:
-                current_chunk = para
+        # If current chunk is empty, start with this sentence (regardless of length)
+        if not current_chunk:
+            current_chunk = sentence
+            continue
+
+        # Combine short sentences together up to max_size
+        if len(current_chunk) + len(sentence) + 1 <= max_size:
+            current_chunk = current_chunk + " " + sentence
         else:
-            # Save current chunk if it exists
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-
-            # If paragraph is too long, split it into sentences
-            if len(para) > max_size:
-                sentences = re.split(r'(?<=[.!?])\s+', para)
-                current_chunk = ""
-
-                for sentence in sentences:
-                    if len(current_chunk) + len(sentence) + 1 <= max_size:
-                        if current_chunk:
-                            current_chunk += " " + sentence
-                        else:
-                            current_chunk = sentence
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk.strip())
-
-                        # If single sentence is too long, split it
-                        if len(sentence) > max_size:
-                            words = sentence.split()
-                            current_chunk = ""
-                            for word in words:
-                                if len(current_chunk) + len(word) + 1 <= max_size:
-                                    if current_chunk:
-                                        current_chunk += " " + word
-                                    else:
-                                        current_chunk = word
-                                else:
-                                    if current_chunk:
-                                        chunks.append(current_chunk.strip())
-                                    current_chunk = word
-                        else:
-                            current_chunk = sentence
-            else:
-                current_chunk = para
+            # Current chunk is full - save it and start new one
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
 
     if current_chunk:
         chunks.append(current_chunk.strip())
@@ -412,6 +634,126 @@ def save_checkpoint(checkpoint_path: str, data: dict):
     """Saves checkpoint to file."""
     with open(checkpoint_path, 'w') as f:
         json.dump(data, f)
+
+
+def stretch_pauses(audio_segment: AudioSegment, factor: float = 1.5,
+                    silence_thresh: int = -35, min_silence_len: int = 150) -> AudioSegment:
+    """
+    Extends natural pauses between words/phrases without changing pitch or speech speed.
+
+    Args:
+        audio_segment: Audio segment to process
+        factor: How much to stretch pauses (1.5 = 50% longer pauses)
+        silence_thresh: Volume threshold in dBFS to consider as silence
+        min_silence_len: Minimum silence duration in ms to detect
+    """
+    from pydub.silence import detect_nonsilent
+
+    nonsilent_ranges = detect_nonsilent(
+        audio_segment,
+        min_silence_len=min_silence_len,
+        silence_thresh=silence_thresh
+    )
+
+    if not nonsilent_ranges:
+        return audio_segment
+
+    result = AudioSegment.empty()
+
+    for i, (start, end) in enumerate(nonsilent_ranges):
+        # Add silence before this speech segment (stretched)
+        if i == 0:
+            if start > 0:
+                silence_dur = int(start * factor)
+                result += AudioSegment.silent(duration=silence_dur,
+                                              frame_rate=audio_segment.frame_rate)
+        else:
+            prev_end = nonsilent_ranges[i - 1][1]
+            gap = start - prev_end
+            if gap > 0:
+                stretched_gap = int(gap * factor)
+                result += AudioSegment.silent(duration=stretched_gap,
+                                              frame_rate=audio_segment.frame_rate)
+
+        # Add the speech part unchanged
+        result += audio_segment[start:end]
+
+    # Trailing silence
+    last_end = nonsilent_ranges[-1][1]
+    if last_end < len(audio_segment):
+        trailing = int((len(audio_segment) - last_end) * factor)
+        result += AudioSegment.silent(duration=trailing,
+                                      frame_rate=audio_segment.frame_rate)
+
+    return result
+
+
+def pad_chunk_with_silence(audio: AudioSegment, pad_ms: int = 150) -> AudioSegment:
+    """
+    Adds silence padding at the start and end of a chunk so that crossfade
+    blends silence rather than cutting into speech.
+
+    Args:
+        audio: Audio segment to pad
+        pad_ms: Duration of silence padding in ms (should be >= crossfade duration)
+    """
+    silence = AudioSegment.silent(duration=pad_ms, frame_rate=audio.frame_rate)
+    return silence + audio + silence
+
+
+CHAPTER_TITLE_PAUSE_MS = 2500  # silence before and after chapter title
+
+
+def separate_chapter_heading(text: str) -> tuple:
+    """
+    Detects chapter heading (e.g. "Rozdział 6 TYTUŁ WIELKIMI LITERAMI") at the
+    beginning of text and separates it from the body.
+
+    Returns:
+        (heading, rest_of_text) or (None, text) if no heading found.
+    """
+    text = text.strip()
+    prefix_match = re.match(
+        r'^((?:rozdział|rozdzial|chapter|część|czesc|part)\s*\d+)\s*',
+        text, re.IGNORECASE
+    )
+    if not prefix_match:
+        return None, text
+
+    prefix = prefix_match.group(1)
+    rest = text[prefix_match.end():]
+
+    # Collect uppercase title words, stop at single letter followed by lowercase
+    # (that's the start of the body text, e.g. "W isława" = "Wisława")
+    words = rest.split()
+    title_words = []
+    for j, w in enumerate(words):
+        clean = re.sub(r'[,.\"\"\"\(\)\-]', '', w)
+        if not clean:
+            title_words.append(w)
+            continue
+        # Single uppercase letter + next word starts lowercase = sentence start
+        if len(clean) == 1 and clean.isupper() and j + 1 < len(words):
+            next_clean = re.sub(r'[,.\"\"\"]', '', words[j + 1])
+            if next_clean and next_clean[0].islower():
+                break
+        if clean[0].isupper() and (len(clean) == 1 or clean.isupper()):
+            title_words.append(w)
+        else:
+            break
+
+    if title_words:
+        heading = prefix + ' ' + ' '.join(title_words)
+    else:
+        heading = prefix
+
+    # Convert numbers in heading to ordinals for natural TTS reading
+    heading = convert_numbers_to_ordinals(heading)
+
+    body = ' '.join(words[len(title_words):])
+    if body:
+        return heading.strip(), body.strip()
+    return None, text
 
 
 def adjust_audio_speed(audio_segment: AudioSegment, speed: float) -> AudioSegment:
@@ -437,6 +779,56 @@ def adjust_audio_speed(audio_segment: AudioSegment, speed: float) -> AudioSegmen
     return sound_with_altered_frame_rate.set_frame_rate(audio_segment.frame_rate)
 
 
+_tts_sub_counter = 0
+
+
+def _tts_with_retry(tts, text: str, temp_dir: str, chapter_idx: int, chunk_idx: int, speaker_wav: str) -> List[str]:
+    """
+    Tries to generate TTS for text. If XTTS fails with 400 token error,
+    splits text in half and retries recursively.
+    Returns list of generated wav file paths.
+    """
+    global _tts_sub_counter
+    _tts_sub_counter += 1
+    chunk_file = os.path.join(temp_dir, f"chapter_{chapter_idx:03d}_chunk_{chunk_idx:04d}_s{_tts_sub_counter:03d}.wav")
+
+    # Add trailing punctuation to prevent XTTS from cutting off the last syllable
+    tts_text = text.rstrip()
+    if tts_text and tts_text[-1] not in '.!?…':
+        tts_text += '.'
+
+    try:
+        tts.tts_to_file(
+            text=tts_text,
+            file_path=chunk_file,
+            speaker_wav=speaker_wav,
+            language="pl",
+            split_sentences=True
+        )
+        return [chunk_file]
+    except Exception as e:
+        if "400 tokens" in str(e) and len(text) > 20:
+            mid = len(text) // 2
+            space_pos = text.rfind(' ', 0, mid)
+            if space_pos == -1:
+                space_pos = text.find(' ', mid)
+            if space_pos == -1:
+                console.print(f"[red]Error at chunk {chunk_idx}: {e}[/red]")
+                return []
+            half1 = text[:space_pos].strip()
+            half2 = text[space_pos:].strip()
+            console.print(f"[yellow]   Chunk {chunk_idx} too long ({len(text)} chars), splitting...[/yellow]")
+            results = []
+            if half1:
+                results.extend(_tts_with_retry(tts, half1, temp_dir, chapter_idx, chunk_idx, speaker_wav))
+            if half2:
+                results.extend(_tts_with_retry(tts, half2, temp_dir, chapter_idx, chunk_idx, speaker_wav))
+            return results
+        else:
+            console.print(f"[red]Error at chunk {chunk_idx}: {e}[/red]")
+            return []
+
+
 def generate_chapter_audio(
     tts: TTS,
     chapter: dict,
@@ -447,7 +839,8 @@ def generate_chapter_audio(
     checkpoint: dict,
     chunk_size: int = CHUNK_SIZE,
     crossfade_duration: int = CROSSFADE_DURATION,
-    speed: float = 1.0
+    speed: float = 1.0,
+    pause_stretch: float = 1.0,
 ) -> Optional[str]:
     """
     Generates audio for one chapter.
@@ -457,13 +850,18 @@ def generate_chapter_audio(
     """
     title = chapter['title']
     content = chapter['content']
-    chunks = split_into_chunks(content, max_size=chunk_size)
 
-    if not chunks:
+    heading, content_body = separate_chapter_heading(content)
+    chunks = split_into_chunks(content_body, max_size=chunk_size)
+
+    if not chunks and not heading:
         return None
 
     temp_dir = os.path.join(output_dir, 'temp')
     os.makedirs(temp_dir, exist_ok=True)
+
+    global _tts_sub_counter
+    _tts_sub_counter = 0
 
     audio_segments = []
     start_chunk = 0
@@ -473,7 +871,29 @@ def generate_chapter_audio(
         start_chunk = checkpoint['current_chunk']
 
     console.print(f"\n[bold cyan]📖 Chapter {chapter_idx + 1}: {title}[/bold cyan]")
-    console.print(f"   Chunks: {len(chunks)}, characters: {len(content)}")
+    if heading:
+        console.print(f"   Heading: \"{heading}\"")
+    console.print(f"   Chunks: {len(chunks)}, characters: {sum(len(c) for c in chunks)}")
+
+    # Generate chapter heading with emphasis (only for regex path)
+    if heading and start_chunk == 0:
+        heading_file = os.path.join(temp_dir, f"chapter_{chapter_idx:03d}_heading.wav")
+        try:
+            tts.tts_to_file(
+                text=heading + '.',
+                file_path=heading_file,
+                speaker_wav=speaker_wav,
+                language="pl",
+                split_sentences=True
+            )
+            heading_audio = AudioSegment.from_wav(heading_file)
+            pause = AudioSegment.silent(duration=CHAPTER_TITLE_PAUSE_MS,
+                                        frame_rate=heading_audio.frame_rate)
+            emphasized = pause + heading_audio + pause
+            emphasized.export(heading_file, format="wav")
+            audio_segments.append(heading_file)
+        except Exception as e:
+            console.print(f"[red]Error generating heading: {e}[/red]")
 
     with Progress(
         SpinnerColumn(),
@@ -489,25 +909,13 @@ def generate_chapter_audio(
             if i < start_chunk:
                 continue
 
-            chunk_file = os.path.join(temp_dir, f"chapter_{chapter_idx:03d}_chunk_{i:04d}.wav")
+            generated = _tts_with_retry(tts, chunk, temp_dir, chapter_idx, i, speaker_wav)
+            audio_segments.extend(generated)
 
-            try:
-                tts.tts_to_file(
-                    text=chunk,
-                    file_path=chunk_file,
-                    speaker_wav=speaker_wav,
-                    language="pl"
-                )
-                audio_segments.append(chunk_file)
-
-                # Update checkpoint
-                checkpoint['current_chapter'] = chapter_idx
-                checkpoint['current_chunk'] = i + 1
-                save_checkpoint(checkpoint_path, checkpoint)
-
-            except Exception as e:
-                console.print(f"[red]Error at chunk {i}: {e}[/red]")
-                continue
+            # Update checkpoint
+            checkpoint['current_chapter'] = chapter_idx
+            checkpoint['current_chunk'] = i + 1
+            save_checkpoint(checkpoint_path, checkpoint)
 
             progress.update(task, advance=1)
 
@@ -521,7 +929,7 @@ def generate_chapter_audio(
         console.print(f"   Combining chunks...")
         combined = None
 
-        for idx, segment_file in enumerate(audio_segments):
+        for seg_idx, segment_file in enumerate(audio_segments):
             if os.path.exists(segment_file):
                 segment = AudioSegment.from_wav(segment_file)
 
@@ -529,16 +937,17 @@ def generate_chapter_audio(
                 if speed != 1.0:
                     segment = adjust_audio_speed(segment, speed)
 
+                # Stretch pauses between words/phrases
+                if pause_stretch > 1.0:
+                    segment = stretch_pauses(segment, factor=pause_stretch)
+
                 if combined is None:
-                    # First chunk
                     combined = segment
                 else:
-                    # Use crossfade for smooth transition (if enabled)
-                    # Chunks overlap instead of having a pause - much more natural effect
                     if crossfade_duration > 0:
+                        segment = pad_chunk_with_silence(segment, pad_ms=crossfade_duration + 50)
                         combined = combined.append(segment, crossfade=crossfade_duration)
                     else:
-                        # No crossfade - direct concatenation
                         combined += segment
 
         # Export
@@ -607,7 +1016,7 @@ def main():
         "--chunk-size",
         type=int,
         default=CHUNK_SIZE,
-        help=f"Maximum chunk size in characters (default: {CHUNK_SIZE}, ~30s audio)"
+        help=f"Maximum chunk size in characters (default: {CHUNK_SIZE}). Keep under 250 for Polish XTTS v2"
     )
     parser.add_argument(
         "--crossfade",
@@ -627,12 +1036,17 @@ def main():
         help="Speech speed (0.5-2.0, default: 1.0). Values < 1.0 slow down speech, > 1.0 speed up"
     )
     parser.add_argument(
+        "--pause-stretch",
+        type=float,
+        default=1.0,
+        help="Stretch pauses between words/phrases (default: 1.0). E.g. 1.5 = 50%% longer pauses, 2.0 = double. Does not change pitch or speech speed"
+    )
+    parser.add_argument(
         "--optimize",
         choices=['auto', 'speed', 'balanced', 'quality', 'off'],
         default='off',
         help="Optimization profile: auto (auto-detect), speed (GPU, max speed), balanced (balance), quality (best quality), off (use manual settings)"
     )
-
     args = parser.parse_args()
 
     # Speed parameter validation
@@ -728,13 +1142,17 @@ def main():
     total_chars = sum(len(ch['content']) for ch in chapters)
     console.print(f"   Total characters: {total_chars:,}")
 
-    # Estimated time (larger chunks = longer generation time per chunk)
+    # Estimated time (~5s per small chunk for XTTS generation)
     chunk_size = args.chunk_size if hasattr(args, 'chunk_size') else CHUNK_SIZE
-    estimated_minutes = (total_chars / chunk_size) * 20 / 60  # ~20s per chunk for larger chunks
+    estimated_minutes = (total_chars / chunk_size) * 5 / 60
     console.print(f"   Estimated time: ~{estimated_minutes:.0f} minutes")
 
     # Load TTS model
     console.print(f"\n[bold yellow]🤖 Loading TTS model...[/bold yellow]")
+    if TTS is None:
+        console.print("[red]Error: TTS package not installed. Run: pip install TTS==0.22.0[/red]")
+        console.print("[yellow]Note: Requires Python 3.9-3.11 (not compatible with Python 3.12+)[/yellow]")
+        sys.exit(1)
     try:
         import torch
         tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
@@ -766,9 +1184,10 @@ def main():
             console.print(f"   Speech speed: {args.speed}x (slower)")
         else:
             console.print(f"   Speech speed: {args.speed}x (faster)")
+    if args.pause_stretch > 1.0:
+        console.print(f"   Pause stretch: {args.pause_stretch}x (longer pauses between words)")
     if args.optimize != 'off':
         console.print(f"   [cyan]Optimization profile: {args.optimize}[/cyan]")
-
     # Generate audio for each chapter
     start_chapter = checkpoint['current_chapter']
 
@@ -790,7 +1209,8 @@ def main():
             checkpoint=checkpoint,
             chunk_size=args.chunk_size,
             crossfade_duration=args.crossfade,
-            speed=args.speed
+            speed=args.speed,
+            pause_stretch=args.pause_stretch,
         )
 
         if result:
