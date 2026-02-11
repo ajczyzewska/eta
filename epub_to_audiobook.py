@@ -29,16 +29,19 @@ import re
 import sys
 import warnings
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 import multiprocessing
 import psutil
+import pysbd
 
 import ebooklib
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub
 from pydub import AudioSegment
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from tts_optimizer import TTSOptimizer
+from audio_postprocessor import AudioPostprocessor
 try:
     from TTS.api import TTS
 except ImportError:
@@ -59,7 +62,9 @@ OUTPUT_FORMAT = "mp3"  # Output format (mp3 or wav)
 CROSSFADE_DURATION = 100  # Overlap time in ms (crossfade for smoothness)
 # Crossfade gives a much more natural effect than pauses
 
-XTTS_CHUNK_LIMIT = 220  # Safe character limit for Polish XTTS v2
+# Sentence boundary detection using pySBD (rule-based, fast, no GPU needed)
+_sentence_segmenter_pl = pysbd.Segmenter(language="pl", clean=False)
+_sentence_segmenter_en = pysbd.Segmenter(language="en", clean=False)
 
 
 def detect_system_capabilities() -> Dict:
@@ -275,6 +280,55 @@ def _get_items_in_reading_order(book) -> list:
     return [items_by_name[name] for name in ordered_names if name in items_by_name]
 
 
+QUOTE_PAUSE_MARKER = "[PAUZA_CYTAT]"
+# Minimum quote length (characters) to annotate — short quotes like „tak" are
+# part of dialogue and don't need "Cytat:" / "Koniec cytatu." framing.
+MIN_QUOTE_LENGTH_FOR_ANNOTATION = 50
+
+
+def _annotate_quotes(text: str) -> str:
+    """
+    Wraps long quotes with spoken annotations and pause markers for TTS.
+
+    „Długi cytat..."  →  [PAUZA_CYTAT] Cytat: „Długi cytat..." Koniec cytatu. [PAUZA_CYTAT]
+
+    This helps the listener distinguish quoted passages from narration.
+    Only annotates quotes longer than MIN_QUOTE_LENGTH_FOR_ANNOTATION characters.
+
+    Runs AFTER clean_text(), so handles both:
+    - Polish „..." (opening „ survives clean_text)
+    - Normalized „..." where closing " was replaced with straight "
+    """
+    def _replace_quote(m):
+        inner = m.group('content')
+        if len(inner) < MIN_QUOTE_LENGTH_FOR_ANNOTATION:
+            return m.group(0)
+        trailing = (m.group('trail') or '').strip()
+        # "Koniec cytatu." already ends with a dot, so skip redundant trailing dot
+        if trailing == '.':
+            trailing = ''
+        return (
+            f' {QUOTE_PAUSE_MARKER} '
+            f'Cytat: {inner}'
+            f' {QUOTE_PAUSE_MARKER} '
+            f'Koniec cytatu.'
+            f'{" " + trailing if trailing else ""}'
+            f' {QUOTE_PAUSE_MARKER} '
+        )
+
+    # Named groups for clarity:
+    # - content: the text inside the quote marks (without the marks themselves)
+    # - trail: optional punctuation/space after closing quote
+    text = re.sub(
+        '[\u201e\u201c]'                         # opening quote mark
+        '(?P<content>[^\u201e\u201c\u201d"]{20,}?)'  # inner text
+        '[\u201d"]'                               # closing quote mark
+        r'(?P<trail>[.,:;!?…]?\s*)',              # trailing punctuation + space
+        _replace_quote, text
+    )
+    return text
+
+
 def extract_chapters_from_epub(epub_path: str, verbose: bool = False) -> tuple:
     """
     Extracts chapters from EPUB file.
@@ -288,81 +342,85 @@ def extract_chapters_from_epub(epub_path: str, verbose: bool = False) -> tuple:
 
     # Collect all documents in reading order
     for item in _get_items_in_reading_order(book):
-            content = item.get_content().decode('utf-8')
+        content = item.get_content().decode('utf-8')
 
-            # Fix drop cap initials before parsing:
-            # <span class="litera_inicjal">W</span>isława -> Wisława
-            content = re.sub(
-                r'<span[^>]*(?:inicjal|dropcap|drop.cap|lettrine)[^>]*>(\w)</span>',
-                r'\1', content, flags=re.IGNORECASE
-            )
+        # Fix drop cap initials before parsing:
+        # <span class="litera_inicjal">W</span>isława -> Wisława
+        content = re.sub(
+            r'<span[^>]*(?:inicjal|dropcap|drop.cap|lettrine)[^>]*>(\w)</span>',
+            r'\1', content, flags=re.IGNORECASE
+        )
 
-            soup = BeautifulSoup(content, 'html.parser')
+        soup = BeautifulSoup(content, 'html.parser')
 
-            # Remove non-content elements
-            for element in soup.find_all(['script', 'style', 'nav']):
-                element.decompose()
+        # Remove non-content elements
+        for element in soup.find_all(['script', 'style', 'nav']):
+            element.decompose()
 
-            # Remove footnote references (e.g. <sup><a href="...">[1]</a></sup>)
-            for element in soup.find_all('sup'):
-                element.decompose()
+        # Remove footnote references (e.g. <sup><a href="...">[1]</a></sup>)
+        for element in soup.find_all('sup'):
+            element.decompose()
 
-            # Remove images and their captions
-            for element in soup.find_all(['figure', 'figcaption', 'img', 'svg', 'picture']):
-                element.decompose()
-            # Remove elements with caption-like CSS classes
-            caption_patterns = re.compile(
-                r'(caption|image[-_]?desc|photo[-_]?credit|ilustracja|opis[-_]?zdj|podpis)',
-                re.IGNORECASE
-            )
-            for element in soup.find_all(class_=caption_patterns):
-                element.decompose()
-            for element in soup.find_all(id=caption_patterns):
-                element.decompose()
+        # Remove images and their captions
+        for element in soup.find_all(['figure', 'figcaption', 'img', 'svg', 'picture']):
+            element.decompose()
+        for element in soup.find_all(class_=_CAPTION_PATTERN):
+            element.decompose()
+        for element in soup.find_all(id=_CAPTION_PATTERN):
+            element.decompose()
 
-            # Extract chapter title
-            title = None
-            for tag in ['h1', 'h2', 'h3', 'title']:
-                title_tag = soup.find(tag)
-                if title_tag:
-                    title = title_tag.get_text().strip()
-                    break
+        # Extract chapter title
+        title = None
+        for tag in ['h1', 'h2', 'h3', 'title']:
+            title_tag = soup.find(tag)
+            if title_tag:
+                title = title_tag.get_text().strip()
+                break
 
-            if not title:
-                title = item.get_name().replace('.xhtml', '').replace('.html', '')
+        if not title:
+            title = item.get_name().replace('.xhtml', '').replace('.html', '')
 
-            # Extract text
-            text = soup.get_text(separator=' ')
-            text = clean_text(text)
+        # Inject pause marker after heading tags for TTS pause insertion
+        for heading_tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            heading_tag.insert_after(NavigableString(f' {HEADING_PAUSE_MARKER} '))
 
-            # Remove page numbers (e.g. "12", "Strona 12", "Page 12")
-            text = re.sub(r'\b(strona|page)\s+\d+\b', '', text, flags=re.IGNORECASE)
-            text = re.sub(r'\n\s*\d+\s*\n', '\n', text)  # Standalone numbers in lines
-            text = clean_text(text)  # Clean again after removing numbers
+        # Extract text
+        text = soup.get_text(separator=' ')
+        text = clean_text(text)
 
-            # Regex preprocessing
-            # Convert cardinal numbers to ordinals for natural TTS reading
-            text = convert_numbers_to_ordinals(text)
+        # Remove page numbers (e.g. "12", "Strona 12", "Page 12")
+        text = re.sub(r'\b(strona|page)\s+\d+\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)  # Standalone numbers in lines
+        text = clean_text(text)  # Clean again after removing numbers
 
-            # Remove any remaining footnote markers like [1], [2], etc.
-            text = re.sub(r'\s*\[\d+\]\s*', ' ', text)
-            # Clean up orphaned punctuation after footnote removal
-            text = re.sub(r'(["\u201d\u201c])\s+\.', r'\1.', text)
-            text = re.sub(r'\.\s+\.', '.', text)
-            text = clean_text(text)
+        # Convert cardinal numbers to ordinals for natural TTS reading
+        text = convert_numbers_to_ordinals(text)
 
-            # Add "Cytat:" before long quotes for TTS emphasis
-            text = re.sub(
-                r'(?<=[.!?…])\s+(„[^"]{50,}?")',
-                r' Cytat: \1',
-                text
-            )
+        # Remove any remaining footnote markers like [1], [2], etc.
+        text = re.sub(r'\s*\[\d+\]\s*', ' ', text)
+        # Clean up orphaned punctuation after footnote removal
+        text = re.sub(r'(["\u201d\u201c])\s+\.', r'\1.', text)
+        text = re.sub(r'\.\s+\.', '.', text)
+        text = clean_text(text)
 
-            all_items.append({
-                'title': title,
-                'content': text,
-                'filename': item.get_name()
-            })
+        # Wrap long quotes with "Cytat:" / "Koniec cytatu." and pause markers
+        # for clear TTS reading. Handles Polish „..." and "..." quote styles.
+        text = _annotate_quotes(text)
+
+        # Add pause marker after "Rozdział/Chapter" patterns not already marked from HTML headings
+        text = re.sub(
+            r'((?:rozdział|rozdzial|chapter|część|czesc|part)\s+[\dIVXLCivxlc]+[^\S\n]*[^\n]*?)'
+            r'(?<!' + re.escape(HEADING_PAUSE_MARKER) + r')',
+            lambda m: m.group(0) + f' {HEADING_PAUSE_MARKER}' if HEADING_PAUSE_MARKER not in m.group(0) else m.group(0),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        all_items.append({
+            'title': title,
+            'content': text,
+            'filename': item.get_name()
+        })
 
     # Filter chapters
     chapters = []
@@ -533,6 +591,11 @@ def clean_text(text: str) -> str:
     # Replace quotes with standard ones
     text = text.replace('"', '"').replace('"', '"')
     text = text.replace(''', "'").replace(''', "'")
+    # Replace (...) with spoken form to avoid TTS artifacts
+    text = re.sub(r'\(\s*\.\.\.\s*\)', ' pominięto fragment ', text)
+    text = re.sub(r'\(\s*…\s*\)', ' pominięto fragment ', text)
+    # Normalize triple dots to unicode ellipsis (XTTS handles … better than ...)
+    text = text.replace('...', '…')
     return text.strip()
 
 
@@ -546,19 +609,107 @@ def sanitize_filename(name: str) -> str:
     return name[:50]
 
 
+# Polish abbreviations that pySBD may incorrectly split on
+_PL_ABBREVIATIONS = {
+    'prof', 'dr', 'nr', 'im', 'gen', 'inż', 'mgr', 'hab', 'doc',
+    'itd', 'itp', 'np', 'tj', 'tzn', 'tzw', 'wg', 'ws',
+    'ul', 'al', 'pl', 'os', 'st', 'ks', 'bp', 'abp',
+    'płk', 'kpt', 'ppłk', 'mjr', 'sierż', 'por',
+    'wyd', 'red', 'tłum', 'przeł', 'przyp',
+    'ok', 'ca', 'godz', 'min', 'sek',
+    'tys', 'mln', 'mld',
+}
 
-def _split_into_sentences(text: str) -> List[str]:
-    """
-    Splits text into sentences using heuristics that avoid breaking on:
-    - Dots inside quotes/titles (e.g. „Walka. Tygodnik...")
-    - Common abbreviations (nr., im., gen., itd., itp., etc.)
-    - Initials (A. Mickiewicz)
-    - Numbers with dots (1. 2. etc.)
 
-    A sentence boundary is a dot/!/? followed by whitespace and an uppercase letter
-    or a dash (dialogue), but NOT inside quotes.
+def _split_into_sentences(text: str, language: str = "pl") -> List[str]:
     """
-    # First, protect text inside Polish quotes „..." from splitting
+    Splits text into sentences using pySBD (Python Sentence Boundary Disambiguation)
+    with post-processing to fix Polish abbreviation handling.
+
+    pySBD is rule-based and handles most sentence boundaries well, but its Polish
+    language support may incorrectly split on common abbreviations (prof., dr., nr.).
+    We post-process to merge these fragments back together.
+
+    Falls back to regex-based splitting if pySBD produces unexpected results.
+
+    Args:
+        text: Input text to split
+        language: Language code ("pl" for Polish, "en" for English)
+    """
+    segmenter = _sentence_segmenter_pl if language == "pl" else _sentence_segmenter_en
+
+    sentences = segmenter.segment(text)
+
+    # Filter out empty/whitespace-only segments
+    raw = [s.strip() for s in sentences if s.strip()]
+
+    if language == "pl":
+        raw = _merge_abbreviation_splits(raw)
+
+    # Sanity check: if pySBD returned nothing or a single giant sentence
+    # for text that clearly has multiple sentences, fall back to regex
+    if len(raw) <= 1 and len(text) > 500 and re.search(r'[.!?…]\s+[A-ZŻŹĆĄŚĘŁÓŃ]', text):
+        raw = _split_into_sentences_regex(text)
+
+    return raw
+
+
+def _merge_abbreviation_splits(sentences: List[str]) -> List[str]:
+    """
+    Merges sentence fragments that were incorrectly split on Polish abbreviations.
+
+    Detects when a segment ends with a known abbreviation (e.g. "prof.", "dr.", "nr.")
+    or is just a number fragment (e.g. "5.") and merges it with the next segment.
+    """
+    if not sentences:
+        return sentences
+
+    merged = []
+    i = 0
+    while i < len(sentences):
+        current = sentences[i]
+
+        # Check if this segment ends with an abbreviation or is a number-only fragment
+        while i < len(sentences) - 1 and _looks_like_abbreviation_ending(current):
+            i += 1
+            current = current + " " + sentences[i]
+
+        merged.append(current)
+        i += 1
+
+    return merged
+
+
+def _looks_like_abbreviation_ending(text: str) -> bool:
+    """Check if text ends with a known abbreviation or number that shouldn't be a sentence end."""
+    text = text.rstrip()
+    if not text:
+        return False
+
+    # Check for number-only fragments like "5." or "12."
+    if re.match(r'^\d+\.$', text):
+        return True
+
+    # Check if ends with a known abbreviation
+    # Match last word before the final dot
+    m = re.search(r'(\w+)\.\s*$', text)
+    if m:
+        word = m.group(1).lower()
+        if word in _PL_ABBREVIATIONS:
+            return True
+        # Single uppercase letter followed by dot = initial (e.g., "A.")
+        if len(word) == 1 and word.upper() == m.group(1):
+            return True
+
+    return False
+
+
+def _split_into_sentences_regex(text: str) -> List[str]:
+    """
+    Fallback regex-based sentence splitter for cases where pySBD
+    fails to detect boundaries (e.g., uncommon formatting).
+    """
+    # Protect text inside Polish quotes „..." from splitting
     protected = {}
     counter = [0]
 
@@ -568,14 +719,9 @@ def _split_into_sentences(text: str) -> List[str]:
         counter[0] += 1
         return key
 
-    # Protect „..." and "..." quoted strings
     safe_text = re.sub(r'[„"][^""]*["""]', protect_quoted, text)
-
-    # Split on sentence-ending punctuation followed by space + uppercase letter or dash
-    # This avoids splitting on abbreviations (followed by lowercase) or mid-sentence dots
     parts = re.split(r'(?<=[.!?…])\s+(?=[A-ZŻŹĆĄŚĘŁÓŃ–—(„\[])', safe_text)
 
-    # Restore protected quotes
     sentences = []
     for part in parts:
         for key, val in protected.items():
@@ -587,34 +733,75 @@ def _split_into_sentences(text: str) -> List[str]:
     return sentences
 
 
-def split_into_chunks(text: str, max_size: int = CHUNK_SIZE) -> List[str]:
+def split_into_chunks(text: str, max_size: int = CHUNK_SIZE, max_words: int = 150,
+                      language: str = "pl") -> List[str]:
     """
-    Splits text into sentence-based chunks for natural TTS output.
-    Each chunk is one or more complete sentences. Short consecutive sentences
-    are combined up to max_size for efficiency. Long sentences are kept whole
-    and _tts_with_retry() handles splitting if XTTS can't process them.
+    Intelligently chunks text at natural sentence boundaries for TTS.
+
+    Uses pySBD for accurate sentence boundary detection, then groups sentences
+    into chunks respecting both character and word limits. This ensures:
+    - No mid-sentence cuts
+    - Proper handling of abbreviations, ellipses, dialogue
+    - TTS-friendly chunk sizes (models typically handle 100-200 words best)
+
+    Args:
+        text: Input text to chunk
+        max_size: Maximum characters per chunk
+        max_words: Maximum words per chunk (TTS quality degrades beyond ~200 words)
+        language: Language code for sentence detection ("pl" or "en")
     """
-    sentences = _split_into_sentences(text)
+    sentences = _split_into_sentences(text, language=language)
     chunks = []
     current_chunk = ""
+    current_word_count = 0
 
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
             continue
 
+        sentence_words = len(sentence.split())
+
+        # If sentence contains any pause marker, force a chunk break
+        has_pause_marker = (HEADING_PAUSE_MARKER in sentence
+                            or QUOTE_PAUSE_MARKER in sentence)
+        if has_pause_marker:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            chunks.append(sentence)
+            current_chunk = ""
+            current_word_count = 0
+            continue
+
+        # If previous chunk ended with a pause marker, force a new chunk
+        has_prev_pause = (current_chunk
+                          and (HEADING_PAUSE_MARKER in current_chunk
+                               or QUOTE_PAUSE_MARKER in current_chunk))
+        if has_prev_pause:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+            current_word_count = sentence_words
+            continue
+
         # If current chunk is empty, start with this sentence (regardless of length)
         if not current_chunk:
             current_chunk = sentence
+            current_word_count = sentence_words
             continue
 
-        # Combine short sentences together up to max_size
-        if len(current_chunk) + len(sentence) + 1 <= max_size:
-            current_chunk = current_chunk + " " + sentence
-        else:
+        # Check both character and word limits
+        would_exceed_chars = len(current_chunk) + len(sentence) + 1 > max_size
+        would_exceed_words = current_word_count + sentence_words > max_words
+
+        if would_exceed_chars or would_exceed_words:
             # Current chunk is full - save it and start new one
             chunks.append(current_chunk.strip())
             current_chunk = sentence
+            current_word_count = sentence_words
+        else:
+            # Combine short sentences together
+            current_chunk = current_chunk + " " + sentence
+            current_word_count += sentence_words
 
     if current_chunk:
         chunks.append(current_chunk.strip())
@@ -688,6 +875,34 @@ def stretch_pauses(audio_segment: AudioSegment, factor: float = 1.5,
     return result
 
 
+def _trim_trailing_silence(audio: AudioSegment, silence_thresh: int = -50,
+                           keep_ms: int = 300) -> AudioSegment:
+    """
+    Trims excessive trailing silence from a TTS chunk while keeping a safe tail.
+    Uses a conservative threshold (-50dB) to avoid cutting quiet word endings.
+
+    Args:
+        audio: Audio segment from TTS
+        silence_thresh: dBFS threshold below which audio is considered silence
+        keep_ms: Milliseconds of silence to keep after the last detected speech
+    """
+    from pydub.silence import detect_nonsilent
+
+    nonsilent = detect_nonsilent(audio, min_silence_len=200, silence_thresh=silence_thresh)
+    if not nonsilent:
+        return audio
+
+    last_speech_end = nonsilent[-1][1]
+    trim_point = min(last_speech_end + keep_ms, len(audio))
+
+    if trim_point < len(audio) - 100:  # only trim if saving more than 100ms
+        trimmed = audio[:trim_point]
+        # Apply micro-fade to avoid click from cutting mid-waveform
+        trimmed = trimmed.fade_out(10)
+        return trimmed
+    return audio
+
+
 def pad_chunk_with_silence(audio: AudioSegment, pad_ms: int = 150) -> AudioSegment:
     """
     Adds silence padding at the start and end of a chunk so that crossfade
@@ -701,7 +916,17 @@ def pad_chunk_with_silence(audio: AudioSegment, pad_ms: int = 150) -> AudioSegme
     return silence + audio + silence
 
 
+# Regex for matching image caption CSS classes/IDs in EPUB HTML
+_CAPTION_PATTERN = re.compile(
+    r'(caption|image[-_]?desc|photo[-_]?credit|ilustracja|opis[-_]?zdj|podpis)',
+    re.IGNORECASE
+)
+
 CHAPTER_TITLE_PAUSE_MS = 2500  # silence before and after chapter title
+HEADING_PAUSE_MS = 2000  # silence after any heading detected in text
+HEADING_PAUSE_MARKER = "[PAUZA]"  # marker injected after headings during preprocessing
+QUOTE_PAUSE_MS = 1000  # silence after "Cytat:" intro and after "Koniec cytatu."
+QUOTE_END_PAUSE_MS = 1500  # silence before "Koniec cytatu." (longer for clear separation)
 
 
 def separate_chapter_heading(text: str) -> tuple:
@@ -756,46 +981,27 @@ def separate_chapter_heading(text: str) -> tuple:
     return None, text
 
 
-def adjust_audio_speed(audio_segment: AudioSegment, speed: float) -> AudioSegment:
-    """
-    Changes audio speed without changing pitch.
-
-    Args:
-        audio_segment: Audio segment to process
-        speed: Speed factor (0.5 = 50% slower, 2.0 = 2x faster)
-
-    Returns:
-        AudioSegment with adjusted speed
-    """
-    if speed == 1.0:
-        return audio_segment
-
-    # Change sample rate to change speed
-    # Then restore original sample rate to preserve pitch
-    sound_with_altered_frame_rate = audio_segment._spawn(
-        audio_segment.raw_data,
-        overrides={"frame_rate": int(audio_segment.frame_rate * speed)}
-    )
-    return sound_with_altered_frame_rate.set_frame_rate(audio_segment.frame_rate)
-
-
 _tts_sub_counter = 0
 
 
-def _tts_with_retry(tts, text: str, temp_dir: str, chapter_idx: int, chunk_idx: int, speaker_wav: str) -> List[str]:
+def _tts_with_retry(tts, text: str, temp_dir: str, chapter_idx: int, chunk_idx: int,
+                    speaker_wav: str, speed: float = 1.0) -> List[str]:
     """
-    Tries to generate TTS for text. If XTTS fails with 400 token error,
-    splits text in half and retries recursively.
+    Tries to generate TTS for text with optimized parameters.
+    If XTTS fails with 400 token error, splits text in half and retries recursively.
     Returns list of generated wav file paths.
     """
     global _tts_sub_counter
     _tts_sub_counter += 1
     chunk_file = os.path.join(temp_dir, f"chapter_{chapter_idx:03d}_chunk_{chunk_idx:04d}_s{_tts_sub_counter:03d}.wav")
 
-    # Add trailing punctuation to prevent XTTS from cutting off the last syllable
+    # Ensure text ends with strong punctuation so XTTS fully voices the last word
     tts_text = text.rstrip()
     if tts_text and tts_text[-1] not in '.!?…':
         tts_text += '.'
+
+    # Get content-aware TTS parameters
+    params = TTSOptimizer.get_optimal_params(tts_text, base_speed=speed)
 
     try:
         tts.tts_to_file(
@@ -803,8 +1009,22 @@ def _tts_with_retry(tts, text: str, temp_dir: str, chapter_idx: int, chunk_idx: 
             file_path=chunk_file,
             speaker_wav=speaker_wav,
             language="pl",
-            split_sentences=True
+            split_sentences=True,
+            temperature=params['temperature'],
+            top_p=params['top_p'],
+            repetition_penalty=params['repetition_penalty'],
+            speed=params['speed'],
         )
+        # Clean up chunk boundaries to prevent clicks:
+        # 1. Micro-fade in at start (eliminates pop from non-zero first sample)
+        # 2. Trim trailing silence
+        # 3. Add safety pad so fade_out in combine step works on silence
+        chunk_audio = AudioSegment.from_wav(chunk_file)
+        chunk_audio = chunk_audio.fade_in(3)
+        chunk_audio = _trim_trailing_silence(chunk_audio, keep_ms=150)
+        tail_pad = AudioSegment.silent(duration=50, frame_rate=chunk_audio.frame_rate)
+        chunk_audio = chunk_audio + tail_pad
+        chunk_audio.export(chunk_file, format="wav")
         return [chunk_file]
     except Exception as e:
         if "400 tokens" in str(e) and len(text) > 20:
@@ -820,9 +1040,11 @@ def _tts_with_retry(tts, text: str, temp_dir: str, chapter_idx: int, chunk_idx: 
             console.print(f"[yellow]   Chunk {chunk_idx} too long ({len(text)} chars), splitting...[/yellow]")
             results = []
             if half1:
-                results.extend(_tts_with_retry(tts, half1, temp_dir, chapter_idx, chunk_idx, speaker_wav))
+                results.extend(_tts_with_retry(tts, half1, temp_dir, chapter_idx, chunk_idx,
+                                               speaker_wav, speed))
             if half2:
-                results.extend(_tts_with_retry(tts, half2, temp_dir, chapter_idx, chunk_idx, speaker_wav))
+                results.extend(_tts_with_retry(tts, half2, temp_dir, chapter_idx, chunk_idx,
+                                               speaker_wav, speed))
             return results
         else:
             console.print(f"[red]Error at chunk {chunk_idx}: {e}[/red]")
@@ -841,6 +1063,7 @@ def generate_chapter_audio(
     crossfade_duration: int = CROSSFADE_DURATION,
     speed: float = 1.0,
     pause_stretch: float = 1.0,
+    postprocessor: Optional[AudioPostprocessor] = None,
 ) -> Optional[str]:
     """
     Generates audio for one chapter.
@@ -909,8 +1132,41 @@ def generate_chapter_audio(
             if i < start_chunk:
                 continue
 
-            generated = _tts_with_retry(tts, chunk, temp_dir, chapter_idx, i, speaker_wav)
-            audio_segments.extend(generated)
+            # Check if chunk contains pause markers
+            has_heading_pause = HEADING_PAUSE_MARKER in chunk
+            has_quote_pause = QUOTE_PAUSE_MARKER in chunk
+
+            # Strip all pause markers from text before TTS
+            chunk = chunk.replace(HEADING_PAUSE_MARKER, '')
+            chunk = chunk.replace(QUOTE_PAUSE_MARKER, '')
+            chunk = chunk.strip()
+
+            # Determine pause to append after this chunk's audio
+            if has_heading_pause:
+                pending_pause_ms = HEADING_PAUSE_MS
+            elif has_quote_pause:
+                pending_pause_ms = QUOTE_PAUSE_MS
+            else:
+                pending_pause_ms = 0
+
+            # Check if the NEXT chunk contains "Koniec cytatu." — if so,
+            # add a longer pause at the end of THIS chunk (before "Koniec cytatu.")
+            if i + 1 < len(chunks):
+                next_stripped = chunks[i + 1].replace(QUOTE_PAUSE_MARKER, '').strip()
+                if 'Koniec cytatu' in next_stripped:
+                    pending_pause_ms = max(pending_pause_ms, QUOTE_END_PAUSE_MS)
+
+            if chunk and len(chunk) >= MIN_CHUNK_SIZE:
+                generated = _tts_with_retry(tts, chunk, temp_dir, chapter_idx, i, speaker_wav, speed)
+                # Append pause silence directly to the last generated chunk file
+                if pending_pause_ms > 0 and generated:
+                    last_file = generated[-1]
+                    chunk_audio = AudioSegment.from_wav(last_file)
+                    pause = AudioSegment.silent(duration=pending_pause_ms,
+                                                frame_rate=chunk_audio.frame_rate)
+                    chunk_audio = chunk_audio + pause
+                    chunk_audio.export(last_file, format="wav")
+                audio_segments.extend(generated)
 
             # Update checkpoint
             checkpoint['current_chapter'] = chapter_idx
@@ -933,10 +1189,6 @@ def generate_chapter_audio(
             if os.path.exists(segment_file):
                 segment = AudioSegment.from_wav(segment_file)
 
-                # Apply speed adjustment if needed
-                if speed != 1.0:
-                    segment = adjust_audio_speed(segment, speed)
-
                 # Stretch pauses between words/phrases
                 if pause_stretch > 1.0:
                     segment = stretch_pauses(segment, factor=pause_stretch)
@@ -945,8 +1197,12 @@ def generate_chapter_audio(
                     combined = segment
                 else:
                     if crossfade_duration > 0:
-                        segment = pad_chunk_with_silence(segment, pad_ms=crossfade_duration + 50)
-                        combined = combined.append(segment, crossfade=crossfade_duration)
+                        # Micro-fades only to prevent clicks at join seams.
+                        # Natural pauses are already in the chunks themselves.
+                        micro = 5
+                        combined = combined.fade_out(micro)
+                        segment = segment.fade_in(micro)
+                        combined = combined + segment
                     else:
                         combined += segment
 
@@ -961,7 +1217,17 @@ def generate_chapter_audio(
             if os.path.exists(segment_file):
                 os.remove(segment_file)
 
-        console.print(f"   [green]✅ Saved: {output_file}[/green]")
+        # Post-process to remove artifacts
+        if postprocessor is not None:
+            try:
+                postprocessor.process_chapter(output_file, backup=False)
+                console.print(f"   [green]✅ Saved (post-processed): {output_file}[/green]")
+            except Exception as e:
+                console.print(f"   [yellow]Warning: Post-processing failed: {e}[/yellow]")
+                console.print(f"   [green]✅ Saved: {output_file}[/green]")
+        else:
+            console.print(f"   [green]✅ Saved: {output_file}[/green]")
+
         return output_file
 
     return None
@@ -1046,6 +1312,11 @@ def main():
         choices=['auto', 'speed', 'balanced', 'quality', 'off'],
         default='off',
         help="Optimization profile: auto (auto-detect), speed (GPU, max speed), balanced (balance), quality (best quality), off (use manual settings)"
+    )
+    parser.add_argument(
+        "--postprocess",
+        action="store_true",
+        help="Apply audio post-processing to remove artifacts (requires FFmpeg)"
     )
     args = parser.parse_args()
 
@@ -1143,8 +1414,7 @@ def main():
     console.print(f"   Total characters: {total_chars:,}")
 
     # Estimated time (~5s per small chunk for XTTS generation)
-    chunk_size = args.chunk_size if hasattr(args, 'chunk_size') else CHUNK_SIZE
-    estimated_minutes = (total_chars / chunk_size) * 5 / 60
+    estimated_minutes = (total_chars / args.chunk_size) * 5 / 60
     console.print(f"   Estimated time: ~{estimated_minutes:.0f} minutes")
 
     # Load TTS model
@@ -1158,9 +1428,7 @@ def main():
         tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
 
         # Use GPU if available and recommended by optimization profile
-        device = "cpu"
         if optimization_profile['use_gpu'] and torch.cuda.is_available():
-            device = "cuda"
             tts = tts.to("cuda")
             console.print("[green]✅ Model loaded on GPU[/green]")
         else:
@@ -1188,6 +1456,44 @@ def main():
         console.print(f"   Pause stretch: {args.pause_stretch}x (longer pauses between words)")
     if args.optimize != 'off':
         console.print(f"   [cyan]Optimization profile: {args.optimize}[/cyan]")
+    # Validate FFmpeg availability early if post-processing requested
+    postprocessor = None
+    if args.postprocess:
+        try:
+            postprocessor = AudioPostprocessor(verbose=args.verbose)
+            console.print(f"   [cyan]Post-processing: enabled (FFmpeg)[/cyan]")
+        except RuntimeError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            sys.exit(1)
+    # Generate book intro (title + author) as the first audio file
+    intro_file = os.path.join(output_dir, "00_intro." + OUTPUT_FORMAT)
+    if not args.resume and not os.path.exists(intro_file):
+        console.print(f"\n[bold yellow]🎙️ Generating book intro...[/bold yellow]")
+        try:
+            temp_dir = os.path.join(output_dir, 'temp')
+            os.makedirs(temp_dir, exist_ok=True)
+            intro_text = f"{metadata['title']}. {metadata['author']}."
+            console.print(f"   \"{intro_text}\"")
+            intro_wav = os.path.join(temp_dir, "intro.wav")
+            tts.tts_to_file(
+                text=intro_text,
+                file_path=intro_wav,
+                speaker_wav=speaker_wav,
+                language="pl",
+                split_sentences=True
+            )
+            intro_audio = AudioSegment.from_wav(intro_wav)
+            pause = AudioSegment.silent(duration=CHAPTER_TITLE_PAUSE_MS,
+                                        frame_rate=intro_audio.frame_rate)
+            intro_with_pauses = pause + intro_audio + pause
+            intro_with_pauses.export(intro_file, format=OUTPUT_FORMAT,
+                                     bitrate="192k" if OUTPUT_FORMAT == "mp3" else None)
+            console.print(f"   [green]✅ Intro saved: {intro_file}[/green]")
+            if os.path.exists(intro_wav):
+                os.remove(intro_wav)
+        except Exception as e:
+            console.print(f"[red]Error generating intro: {e}[/red]")
+
     # Generate audio for each chapter
     start_chapter = checkpoint['current_chapter']
 
@@ -1211,6 +1517,7 @@ def main():
             crossfade_duration=args.crossfade,
             speed=args.speed,
             pause_stretch=args.pause_stretch,
+            postprocessor=postprocessor,
         )
 
         if result:
@@ -1224,7 +1531,7 @@ def main():
     if os.path.exists(temp_dir):
         try:
             os.rmdir(temp_dir)
-        except:
+        except OSError:
             pass
 
     # Remove checkpoint after completion

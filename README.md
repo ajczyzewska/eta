@@ -12,7 +12,7 @@ Convert EPUB books to audiobooks using XTTS v2 (Coqui TTS).
 ✅ **High-quality speech synthesis:**
 - Voice cloning from your own voice sample
 - Multi-language support (including Polish)
-- Large text chunks (3000 characters) for fluency
+- Sentence-based text chunks (~300 characters) for fluency
 - Crossfade between chunks
 
 ✅ **Checkpoint system:**
@@ -58,7 +58,7 @@ python epub_to_audiobook.py book.epub --speaker my_voice.wav
 
 ```bash
 # Larger chunks (smoother speech)
-python epub_to_audiobook.py book.epub --chunk-size 5000
+python epub_to_audiobook.py book.epub --chunk-size 400
 
 # Longer crossfade (smoother transitions)
 python epub_to_audiobook.py book.epub --crossfade 150
@@ -95,7 +95,7 @@ python epub_to_audiobook.py book.epub --resume
 | `epub_file` | Path to EPUB file | (required) |
 | `--speaker` | WAV file with voice sample | sample-agent.wav |
 | `--output` | Output directory | book_name_audio |
-| `--chunk-size` | Chunk size (characters) | 3000 |
+| `--chunk-size` | Chunk size (characters) | 300 |
 | `--crossfade` | Crossfade in ms (0=disable) | 100 |
 | `--speed` | Speech speed (0.5-2.0) | 1.0 |
 | `--optimize` | Optimization profile (auto/speed/balanced/quality/off) | off |
@@ -106,7 +106,7 @@ python epub_to_audiobook.py book.epub --resume
 
 ### CPU
 - Works on CPU (slower)
-- Estimated time: ~20s per 3000 character chunk
+- Estimated time: ~5s per 300 character chunk
 
 ### GPU (recommended)
 - NVIDIA GPU with CUDA
@@ -136,17 +136,17 @@ The `--optimize` parameter automatically detects your system capabilities and ad
 - **Other systems** → `quality` profile
 
 **`speed`** - Maximum generation speed (requires GPU):
-- Uses larger chunks (5000 characters)
+- Uses larger chunks (400 characters)
 - Best for: Systems with powerful GPU
 - Trade-off: Slightly less natural pauses between sentences
 
 **`balanced`** - Balance between speed and quality:
-- Uses standard chunks (3000 characters)
+- Uses standard chunks (300 characters)
 - Best for: Most systems with GPU or powerful CPU
 - Default settings when optimization is off
 
 **`quality`** - Best audio quality:
-- Uses smaller chunks (2000 characters)
+- Uses smaller chunks (200 characters)
 - Results in smoother, more natural speech
 - Best for: Final production, when quality is priority
 - Trade-off: Slower generation

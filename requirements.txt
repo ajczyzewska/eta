@@ -16,6 +16,9 @@ pydub>=0.25.1
 # CLI and progress bars
 rich>=13.0.0
 
+# Intelligent sentence boundary detection
+pysbd>=0.3.4
+
 # System monitoring (for optimization)
 psutil>=5.9.0
 
