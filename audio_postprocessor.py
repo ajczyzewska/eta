@@ -71,7 +71,8 @@ class AudioPostprocessor:
 
         # Step 3: Remove clicks and pops
         if declick:
-            filters.append("adeclick=threshold=0.1:window=55:overlap=75")
+            filters.append("adeclick=threshold=0.05:window=55:overlap=75")
+            filters.append("acompressor=threshold=-20dB:ratio=4:attack=5:release=50")
 
         # Step 4: Loudness normalization (EBU R128 for audiobooks)
         if normalize:

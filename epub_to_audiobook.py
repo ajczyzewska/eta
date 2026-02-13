@@ -875,11 +875,12 @@ def stretch_pauses(audio_segment: AudioSegment, factor: float = 1.5,
     return result
 
 
-def _trim_trailing_silence(audio: AudioSegment, silence_thresh: int = -50,
-                           keep_ms: int = 300) -> AudioSegment:
+def _trim_trailing_silence(audio: AudioSegment, silence_thresh: int = -65,
+                           keep_ms: int = 400) -> AudioSegment:
     """
-    Trims excessive trailing silence from a TTS chunk while keeping a safe tail.
-    Uses a conservative threshold (-50dB) to avoid cutting quiet word endings.
+    Gently trims only long trailing silence from a TTS chunk.
+    Very conservative: only cuts silence longer than 800ms, keeps 400ms after
+    last speech, and uses -65dB threshold to never clip quiet word endings.
 
     Args:
         audio: Audio segment from TTS
@@ -888,18 +889,15 @@ def _trim_trailing_silence(audio: AudioSegment, silence_thresh: int = -50,
     """
     from pydub.silence import detect_nonsilent
 
-    nonsilent = detect_nonsilent(audio, min_silence_len=200, silence_thresh=silence_thresh)
+    nonsilent = detect_nonsilent(audio, min_silence_len=800, silence_thresh=silence_thresh)
     if not nonsilent:
         return audio
 
     last_speech_end = nonsilent[-1][1]
     trim_point = min(last_speech_end + keep_ms, len(audio))
 
-    if trim_point < len(audio) - 100:  # only trim if saving more than 100ms
-        trimmed = audio[:trim_point]
-        # Apply micro-fade to avoid click from cutting mid-waveform
-        trimmed = trimmed.fade_out(10)
-        return trimmed
+    if trim_point < len(audio) - 500:  # only trim if saving more than 500ms
+        return audio[:trim_point]
     return audio
 
 
@@ -1015,15 +1013,11 @@ def _tts_with_retry(tts, text: str, temp_dir: str, chapter_idx: int, chunk_idx: 
             repetition_penalty=params['repetition_penalty'],
             speed=params['speed'],
         )
-        # Clean up chunk boundaries to prevent clicks:
-        # 1. Micro-fade in at start (eliminates pop from non-zero first sample)
-        # 2. Trim trailing silence
-        # 3. Add safety pad so fade_out in combine step works on silence
+        # Micro-fade in at start to eliminate pop from non-zero first sample
         chunk_audio = AudioSegment.from_wav(chunk_file)
-        chunk_audio = chunk_audio.fade_in(3)
-        chunk_audio = _trim_trailing_silence(chunk_audio, keep_ms=150)
-        tail_pad = AudioSegment.silent(duration=50, frame_rate=chunk_audio.frame_rate)
-        chunk_audio = chunk_audio + tail_pad
+        chunk_audio = chunk_audio.fade_in(10)
+        chunk_audio = _trim_trailing_silence(chunk_audio, keep_ms=400)
+        chunk_audio = chunk_audio.fade_out(20)
         chunk_audio.export(chunk_file, format="wav")
         return [chunk_file]
     except Exception as e:
@@ -1064,6 +1058,7 @@ def generate_chapter_audio(
     speed: float = 1.0,
     pause_stretch: float = 1.0,
     postprocessor: Optional[AudioPostprocessor] = None,
+    book_metadata: Optional[dict] = None,
 ) -> Optional[str]:
     """
     Generates audio for one chapter.
@@ -1177,10 +1172,18 @@ def generate_chapter_audio(
 
     # Combine all chunks into one file
     if audio_segments:
-        output_file = os.path.join(
-            output_dir,
-            f"{chapter_idx + 1:02d}_{title}.{OUTPUT_FORMAT}"
-        )
+        if book_metadata:
+            book_title = sanitize_filename(book_metadata.get('title', 'Unknown'))
+            book_author = sanitize_filename(book_metadata.get('author', 'Unknown'))
+            output_file = os.path.join(
+                output_dir,
+                f"{book_title}_{book_author}_{chapter_idx + 1:02d}.{OUTPUT_FORMAT}"
+            )
+        else:
+            output_file = os.path.join(
+                output_dir,
+                f"{chapter_idx + 1:02d}_{title}.{OUTPUT_FORMAT}"
+            )
 
         console.print(f"   Combining chunks...")
         combined = None
@@ -1518,6 +1521,7 @@ def main():
             speed=args.speed,
             pause_stretch=args.pause_stretch,
             postprocessor=postprocessor,
+            book_metadata=metadata,
         )
 
         if result:

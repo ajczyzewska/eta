@@ -25,15 +25,15 @@ class TTSOptimizer:
             Dict with TTS generation parameters
         """
         params = {
-            'temperature': 0.65,
+            'temperature': 0.55,
             'top_p': 0.85,
-            'repetition_penalty': 2.0,
+            'repetition_penalty': 1.5,
             'speed': base_speed,
         }
 
         # Dialogue: allow more expressive variation
         if '"' in text or '\u201e' in text or '\u201c' in text:
-            params['temperature'] = 0.70
+            params['temperature'] = 0.60
             params['top_p'] = 0.90
 
         # Questions: slightly slower for emphasis
