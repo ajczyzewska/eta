@@ -57,7 +57,7 @@ twoja_książka_audio/
 python epub_to_audiobook.py książka.epub --speaker moj_glos.wav
 
 # Większe fragmenty = płynniejsza mowa
-python epub_to_audiobook.py książka.epub --chunk-size 5000
+python epub_to_audiobook.py książka.epub --chunk-size 400
 
 # Zobacz co zostało pominięte
 python epub_to_audiobook.py książka.epub --verbose

@@ -10,7 +10,7 @@ python epub_to_audiobook.py moja_książka.epub
 
 **Co się stanie:**
 - Użyje domyślnego głosu `sample-agent.wav`
-- Fragmenty po 3000 znaków
+- Fragmenty po 300 znaków (domyślnie)
 - Crossfade 100ms między fragmentami
 - Wyjście: `moja_książka_audio/`
 
@@ -34,7 +34,7 @@ python epub_to_audiobook.py książka.epub --speaker głos_narratora.wav
 
 ```bash
 python epub_to_audiobook.py książka.epub \
-    --chunk-size 5000 \
+    --chunk-size 400 \
     --crossfade 150
 ```
 
@@ -49,7 +49,7 @@ python epub_to_audiobook.py książka.epub \
 
 ```bash
 python epub_to_audiobook.py książka.epub \
-    --chunk-size 1000 \
+    --chunk-size 200 \
     --crossfade 50
 ```
 
@@ -182,7 +182,7 @@ echo "🎙️  Produkcyjny pipeline dla: $BOOK"
 # 1. Konwertuj z optymalnymi ustawieniami
 python epub_to_audiobook.py "$BOOK" \
     --speaker "$SPEAKER" \
-    --chunk-size 3000 \
+    --chunk-size 300 \
     --crossfade 100 \
     --verbose 2>&1 | tee conversion.log
 
@@ -208,22 +208,22 @@ fi
 
 **Powieści (fiction):**
 ```bash
---chunk-size 3000 --crossfade 100
+--chunk-size 300 --crossfade 100
 ```
 
 **Podręczniki/Non-fiction:**
 ```bash
---chunk-size 2000 --crossfade 50
+--chunk-size 250 --crossfade 50
 ```
 
 **Poezja:**
 ```bash
---chunk-size 500 --crossfade 200
+--chunk-size 200 --crossfade 200
 ```
 
 **Biografie:**
 ```bash
---chunk-size 4000 --crossfade 150
+--chunk-size 400 --crossfade 150
 ```
 
 ---
@@ -231,11 +231,11 @@ fi
 ### Szacowanie czasu konwersji
 
 **CPU (typowy laptop):**
-- ~20-30 sekund na fragment 3000 znaków
+- ~5 sekund na fragment 300 znaków
 - Książka 300 stron (~500k znaków): ~2-3 godziny
 
 **GPU (NVIDIA RTX):**
-- ~2-3 sekundy na fragment 3000 znaków
+- ~0.5 sekundy na fragment 300 znaków
 - Książka 300 stron: ~15-20 minut
 
 ---
@@ -253,7 +253,7 @@ python epub_to_audiobook.py książka.epub --chunk-size 200
 
 ```bash
 # Zmniejsz chunk size lub użyj GPU
-python epub_to_audiobook.py książka.epub --chunk-size 1500
+python epub_to_audiobook.py książka.epub --chunk-size 200
 ```
 
 ### Problem: Nie znaleziono rozdziałów

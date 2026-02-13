@@ -11,7 +11,7 @@ Convert EPUB books to audiobooks using XTTS v2 (Coqui TTS).
 
 ✅ **High-quality speech synthesis:**
 - Voice cloning from your own voice sample
-- Multi-language support (including Polish)
+- Polish language (hardcoded, see code to change)
 - Sentence-based text chunks (~300 characters) for fluency
 - Crossfade between chunks
 
@@ -20,6 +20,20 @@ Convert EPUB books to audiobooks using XTTS v2 (Coqui TTS).
 - Safe process interruption
 
 ## Installation
+
+### Prerequisites
+
+- **Python 3.9-3.11** (not compatible with Python 3.12+)
+- **FFmpeg** - required for MP3 export and audio post-processing:
+  ```bash
+  # macOS
+  brew install ffmpeg
+
+  # Ubuntu/Debian
+  sudo apt-get install ffmpeg
+
+  # Windows - download from https://ffmpeg.org/download.html and add to PATH
+  ```
 
 ### 1. Create virtual environment
 
@@ -98,7 +112,9 @@ python epub_to_audiobook.py book.epub --resume
 | `--chunk-size` | Chunk size (characters) | 300 |
 | `--crossfade` | Crossfade in ms (0=disable) | 100 |
 | `--speed` | Speech speed (0.5-2.0) | 1.0 |
+| `--pause-stretch` | Stretch pauses between words (1.0=normal, 1.5=50% longer) | 1.0 |
 | `--optimize` | Optimization profile (auto/speed/balanced/quality/off) | off |
+| `--postprocess` | Apply audio post-processing to remove artifacts (requires FFmpeg) | false |
 | `--resume` | Resume from checkpoint | false |
 | `--verbose` | Show details | false |
 
@@ -224,11 +240,16 @@ If you see "Model loaded on CPU" but you have an NVIDIA GPU:
    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
    ```
 
+## Language
+
+The TTS language is currently hardcoded to Polish (`language="pl"`). To change it, edit the `language` parameter in `epub_to_audiobook.py` (search for `language="pl"`).
+
+Supported languages depend on the XTTS v2 model (English, Spanish, French, German, Italian, Portuguese, Polish, Turkish, Russian, Dutch, Czech, Arabic, Chinese, Japanese, Korean, Hindi).
+
 ## TTS Model
 
 The project uses **XTTS v2** (Coqui TTS):
 - Model: `tts_models/multilingual/multi-dataset/xtts_v2`
-- Multilingual (supports Polish and other languages)
 - Voice cloning from your own voice sample
 - High-quality speech synthesis
 

@@ -19,7 +19,7 @@ echo "🚀 Rozpoczynam konwersję..."
 echo ""
 
 python epub_to_audiobook.py example.epub \
-    --chunk-size 3000 \
+    --chunk-size 300 \
     --crossfade 100 \
     --verbose
 

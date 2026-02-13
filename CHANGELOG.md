@@ -13,14 +13,14 @@ All notable changes to this project will be documented in this file.
 - Crossfade between audio chunks for smooth transitions
 - GPU acceleration support
 - Polish language support
-- Configurable chunk size (default 3000 characters)
+- Configurable chunk size (default 300 characters)
 - Verbose mode to show skipped content
 - Metadata extraction (title, author)
 
 ### Features
 - ✅ Smart chapter detection
 - ✅ Automatic page number removal
-- ✅ Large chunk sizes (3000 chars) for natural speech flow
+- ✅ Sentence-based chunk sizes (~300 chars) for natural speech flow
 - ✅ Crossfade between chunks (100ms default)
 - ✅ GPU auto-detection
 - ✅ Resume from checkpoint after interruption

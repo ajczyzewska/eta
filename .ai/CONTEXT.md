@@ -27,7 +27,7 @@
 ## Processing Flow
 
 ```
-EPUB → Parse HTML → Filter (skip covers/TOC) → Detect Chapters → Chunk Text (3000 chars) →
+EPUB → Parse HTML → Filter (skip covers/TOC) → Detect Chapters → Chunk Text (300 chars) →
 TTS (XTTS v2) → Speed Adjust → Crossfade (100ms) → MP3 Export → Checkpoints
 ```
 
@@ -42,19 +42,19 @@ TTS (XTTS v2) → Speed Adjust → Crossfade (100ms) → MP3 Export → Checkpoi
 ## Key Constants & Config
 
 ```python
-CHUNK_SIZE = 3000           # Line 51 - Default chars/chunk
-MIN_CHUNK_SIZE = 200        # Line 52
-OUTPUT_FORMAT = "mp3"       # Line 53
-CROSSFADE_DURATION = 100    # Line 54 - ms
-language = "pl"             # Line 499 - Change for other languages
+CHUNK_SIZE = 300            # Line 59 - Default chars/chunk
+MIN_CHUNK_SIZE = 10         # Line 60
+OUTPUT_FORMAT = "mp3"       # Line 61
+CROSSFADE_DURATION = 100    # Line 62 - ms
+language = "pl"             # Hardcoded in _tts_with_retry() and intro generation
 ```
 
 ## Optimization Profiles
 
 - **auto:** Detects hardware → speed (GPU 8GB+), balanced (GPU <8GB or 8+ CPU cores), or quality
-- **speed:** 5000 char chunks, GPU required
-- **balanced:** 3000 chars (default)
-- **quality:** 2000 chars, smoother speech
+- **speed:** 400 char chunks, GPU required
+- **balanced:** 300 chars (default)
+- **quality:** 200 chars, smoother speech
 
 ## Common Modifications
 
@@ -88,10 +88,10 @@ skip_keywords = [
 
 ## Performance
 
-| Mode | Speed/3000chars | 300pg book | Memory |
-|------|-----------------|------------|--------|
-| CPU | ~20-30s | 2-3hr | 2-4GB RAM |
-| GPU | ~2-3s | 15-20min | 2-6GB VRAM |
+| Mode | Speed/300chars | 300pg book | Memory |
+|------|----------------|------------|--------|
+| CPU | ~5s | 2-3hr | 2-4GB RAM |
+| GPU | ~0.5s | 15-20min | 2-6GB VRAM |
 
 ## Common Issues
 
@@ -147,7 +147,7 @@ grep -n "^def " epub_to_audiobook.py
 
 Core: TTS≥0.22.0, ebooklib≥0.18, beautifulsoup4≥4.12.0, lxml≥4.9.0, pydub≥0.25.1, rich≥13.0.0, psutil≥5.9.0, torch≥2.0.0, torchaudio≥2.0.0
 
-System: Python 3.8+, CUDA (optional), ffmpeg (for pydub)
+System: Python 3.9-3.11, CUDA (optional), FFmpeg (required for MP3 export and post-processing)
 
 ## Extension Ideas
 

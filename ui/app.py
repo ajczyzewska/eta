@@ -211,8 +211,14 @@ def open_output():
         return jsonify({'error': 'No output directory known'}), 400
 
     try:
-        # macOS open
-        subprocess.Popen(['open', output_dir])
+        import platform
+        system = platform.system()
+        if system == 'Darwin':
+            subprocess.Popen(['open', output_dir])
+        elif system == 'Windows':
+            os.startfile(output_dir)
+        else:
+            subprocess.Popen(['xdg-open', output_dir])
         return jsonify({'opened': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

@@ -45,6 +45,11 @@ Thumbs.db
 !sample-agent.wav
 .checkpoint.json
 temp/
+uploads/
+
+# UI runtime files
+ui/state.json
+ui/run.log
 
 # Logs
 *.log
