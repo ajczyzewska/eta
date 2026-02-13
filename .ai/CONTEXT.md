@@ -1,28 +1,28 @@
 # EtA - AI Agent Context
 
-> **Quick Start:** Python CLI tool converting EPUB → MP3 audiobooks using XTTS v2 voice cloning. 819 lines, v1.0.0, by Aga Czyzewska.
+> **Quick Start:** Python CLI tool converting EPUB → MP3 audiobooks using XTTS v2 voice cloning. ~1550 lines, v1.0.0, by Aga Czyzewska.
 
 ## Core Info
 
-**Main:** `epub_to_audiobook.py` | **Entry:** `main()` line 586 | **Lang:** Polish (line 499) | **Output:** MP3 @192kbps
+**Main:** `epub_to_audiobook.py` | **Entry:** `main()` line 1264 | **Lang:** Polish (hardcoded) | **Output:** MP3 @192kbps
 
-**Stack:** TTS (XTTS v2), ebooklib, BeautifulSoup, pydub, rich, torch | **GPU:** CUDA (10x faster) | **Model:** 2.5GB
+**Stack:** TTS (XTTS v2), ebooklib, BeautifulSoup, pydub, rich, torch, pysbd | **GPU:** CUDA (10x faster) | **Model:** 2.5GB
 
-**CLI:** `python epub_to_audiobook.py book.epub [--speaker voice.wav] [--optimize auto] [--speed 0.5-2.0] [--chunk-size 200-5000] [--crossfade 0-500] [--resume] [--verbose]`
+**CLI:** `python epub_to_audiobook.py book.epub [--speaker voice.wav] [--optimize auto] [--speed 0.5-2.0] [--chunk-size 200-400] [--crossfade 0-500] [--postprocess] [--pause-stretch 1.0-2.0] [--resume] [--verbose]`
 
 ## Architecture (Key Functions)
 
 | Function | Lines | Purpose |
 |----------|-------|---------|
-| `main()` | 586-818 | Entry point, orchestration |
-| `extract_chapters_from_epub()` | 231-312 | EPUB parsing, HTML→text |
-| `generate_chapter_audio()` | 440-558 | TTS generation, crossfade, MP3 export |
-| `split_into_chunks()` | 336-401 | Text→chunks (paragraphs→sentences→words) |
-| `should_skip_chapter()` | 156-199 | Filter covers/TOC/prefaces/page numbers |
-| `is_likely_chapter()` | 202-228 | Validate actual chapters |
-| `detect_system_capabilities()` | 58-84 | GPU/CPU/RAM detection |
-| `get_optimization_profile()` | 86-154 | auto/speed/balanced/quality profiles |
-| `adjust_audio_speed()` | 417-438 | Speed change without pitch shift |
+| `main()` | 1264-1549 | Entry point, orchestration |
+| `extract_chapters_from_epub()` | 332-458 | EPUB parsing, HTML→text |
+| `generate_chapter_audio()` | 1048-1236 | TTS generation, crossfade, MP3 export |
+| `split_into_chunks()` | 736-809 | Text→chunks (sentences→words) |
+| `should_skip_chapter()` | 168-212 | Filter covers/TOC/prefaces/page numbers |
+| `is_likely_chapter()` | 215-241 | Validate actual chapters |
+| `detect_system_capabilities()` | 70-95 | GPU/CPU/RAM detection |
+| `get_optimization_profile()` | 98-165 | auto/speed/balanced/quality profiles |
+| `_tts_with_retry()` | 985-1045 | TTS with auto-split on token overflow |
 
 ## Processing Flow
 
@@ -60,20 +60,21 @@ language = "pl"             # Hardcoded in _tts_with_retry() and intro generatio
 
 ### Change Language
 ```python
-# Line 499
+# Search for language="pl" in epub_to_audiobook.py (3 occurrences)
+# Lines: 1009, 1104, 1486
 language="en"  # or "es", "de", "fr", etc.
 ```
 
 ### Change Output Format
 ```python
-# Line 53
+# Line 61
 OUTPUT_FORMAT = "wav"
-# Lines 545-548: Update export logic
+# Lines 1213-1216: Update export logic
 ```
 
 ### Add Skip Keywords
 ```python
-# Lines 165-183
+# Lines 178-196 in should_skip_chapter()
 skip_keywords = [
     'your_new_keyword',
     # ...existing keywords
@@ -82,8 +83,8 @@ skip_keywords = [
 
 ### Adjust Chunk Algorithm
 ```python
-# Lines 336-401 in split_into_chunks()
-# Current: paragraphs → sentences → words
+# Lines 736-809 in split_into_chunks()
+# Current: sentences (pySBD) → group by char/word limits
 ```
 
 ## Performance
@@ -137,7 +138,7 @@ python epub_to_audiobook.py book.epub --verbose 2>&1 | tee log.txt
 python -c "import torch; print('GPU:', torch.cuda.is_available())"
 
 # View function
-sed -n '586,818p' epub_to_audiobook.py  # main()
+sed -n '1264,1549p' epub_to_audiobook.py  # main()
 
 # List functions
 grep -n "^def " epub_to_audiobook.py
@@ -155,7 +156,7 @@ System: Python 3.9-3.11, CUDA (optional), FFmpeg (required for MP3 export and po
 
 ## Limitations
 
-- Single-threaded | Polish hardcoded (line 499) | MP3-only | No ID3 metadata | Large EPUBs slow on CPU
+- Single-threaded | Polish hardcoded (3 occurrences of language="pl") | MP3-only | No ID3 metadata | Large EPUBs slow on CPU
 
 ---
 

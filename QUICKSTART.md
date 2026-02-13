@@ -9,7 +9,18 @@ git clone <your-repo-url>
 cd EtA
 ```
 
-### 2. Setup środowiska
+### 2. Wymagania wstępne
+
+- **Python 3.9-3.11** (nie kompatybilne z Python 3.12+)
+- **FFmpeg** - wymagany do eksportu MP3:
+  ```bash
+  # macOS
+  brew install ffmpeg
+  # Ubuntu/Debian
+  sudo apt-get install ffmpeg
+  ```
+
+### 3. Setup środowiska
 
 ```bash
 # Utwórz wirtualne środowisko
@@ -24,7 +35,7 @@ source .venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-### 3. Przygotuj głos (opcjonalnie)
+### 4. Przygotuj głos (opcjonalnie)
 
 Jeśli chcesz użyć własnego głosu:
 - Nagraj 10-30 sekund czystego nagrania głosu
@@ -32,7 +43,7 @@ Jeśli chcesz użyć własnego głosu:
 
 Lub użyj domyślnego głosu `sample-agent.wav`
 
-### 4. Konwertuj książkę!
+### 5. Konwertuj książkę!
 
 ```bash
 python epub_to_audiobook.py twoja_książka.epub

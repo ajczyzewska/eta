@@ -156,8 +156,8 @@ python epub_to_audiobook.py książka.epub
 ### B. Debugowanie problemu z jakością
 
 ```bash
-# Testuj różne chunk sizes
-for size in 200 500 1000 2000 3000 5000; do
+# Testuj różne chunk sizes (uwaga: wartości >400 mogą przekroczyć limit tokenów XTTS)
+for size in 150 200 250 300 400; do
     python epub_to_audiobook.py test.epub \
         --chunk-size $size \
         --output test_$size
