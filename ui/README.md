@@ -2,7 +2,9 @@
 
 This folder contains a minimal Flask-based local web UI to run the existing `epub_to_audiobook.py` script without using terminal commands.
 
-Quick start (macOS):
+Prerequisites: Python 3.9-3.11, FFmpeg (see main README.md).
+
+Quick start:
 
 1. Create a Python virtual environment and install dependencies:
 
