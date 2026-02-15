@@ -78,6 +78,7 @@ def detect_system_capabilities() -> Dict:
         'gpu_available': False,
         'gpu_memory': 0,
         'gpu_name': None,
+        'gpu_backend': None,
         'cpu_cores': multiprocessing.cpu_count(),
         'ram_gb': psutil.virtual_memory().total / (1024 ** 3)
     }
@@ -87,8 +88,13 @@ def detect_system_capabilities() -> Dict:
         if torch.cuda.is_available():
             capabilities['gpu_available'] = True
             capabilities['gpu_name'] = torch.cuda.get_device_name(0)
-            # GPU memory in GB
             capabilities['gpu_memory'] = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            capabilities['gpu_backend'] = 'cuda'
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            capabilities['gpu_available'] = True
+            capabilities['gpu_name'] = 'Apple Silicon (MPS)'
+            capabilities['gpu_memory'] = capabilities['ram_gb']  # shared memory
+            capabilities['gpu_backend'] = 'mps'
     except Exception:
         pass
 
@@ -1431,9 +1437,10 @@ def main():
         tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
 
         # Use GPU if available and recommended by optimization profile
-        if optimization_profile['use_gpu'] and torch.cuda.is_available():
-            tts = tts.to("cuda")
-            console.print("[green]✅ Model loaded on GPU[/green]")
+        gpu_backend = capabilities.get('gpu_backend')
+        if optimization_profile['use_gpu'] and gpu_backend:
+            tts = tts.to(gpu_backend)
+            console.print(f"[green]✅ Model loaded on GPU ({gpu_backend.upper()})[/green]")
         else:
             tts = tts.to("cpu")
             console.print("[green]✅ Model loaded on CPU[/green]")
