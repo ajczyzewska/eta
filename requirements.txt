@@ -22,6 +22,9 @@ pysbd>=0.3.4
 # System monitoring (for optimization)
 psutil>=5.9.0
 
+# Bangla phonemizer dependency - versions > 0.0.2 use Python 3.10+ syntax (bool | None)
+bangla==0.0.2
+
 # PyTorch (for TTS model)
 # Using specific versions for compatibility with TTS 0.22.0
 torch==2.1.0

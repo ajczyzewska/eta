@@ -31,6 +31,9 @@ source .venv/bin/activate  # Linux/Mac
 # lub
 .venv\Scripts\activate     # Windows
 
+# Zaktualizuj pip (ważne - stary pip może mieć problemy z pobieraniem dużych pakietów)
+pip install --upgrade pip
+
 # Zainstaluj zależności
 pip install -r requirements.txt
 ```
