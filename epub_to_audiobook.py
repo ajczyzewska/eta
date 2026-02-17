@@ -22,10 +22,12 @@ Usage:
     python epub_to_audiobook.py book.epub --verbose  # show skipped elements
 """
 
+import os
 import argparse
 import json
-import os
+import glob
 import re
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -61,6 +63,7 @@ MIN_CHUNK_SIZE = 10  # Minimum characters (low threshold since chunks are small)
 OUTPUT_FORMAT = "mp3"  # Output format (mp3 or wav)
 CROSSFADE_DURATION = 100  # Overlap time in ms (crossfade for smoothness)
 # Crossfade gives a much more natural effect than pauses
+COMBINE_BATCH_SIZE = 50  # Max segments to combine in memory before flushing to disk
 
 # Sentence boundary detection using pySBD (rule-based, fast, no GPU needed)
 _sentence_segmenter_pl = pysbd.Segmenter(language="pl", clean=False)
@@ -90,11 +93,8 @@ def detect_system_capabilities() -> Dict:
             capabilities['gpu_name'] = torch.cuda.get_device_name(0)
             capabilities['gpu_memory'] = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
             capabilities['gpu_backend'] = 'cuda'
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            capabilities['gpu_available'] = True
-            capabilities['gpu_name'] = 'Apple Silicon (MPS)'
-            capabilities['gpu_memory'] = capabilities['ram_gb']  # shared memory
-            capabilities['gpu_backend'] = 'mps'
+        # MPS (Apple Silicon) is deliberately skipped — XTTS v2 uses ComplexFloat
+        # and FFT ops that MPS doesn't support, causing silent chunk drops.
     except Exception:
         pass
 
@@ -1051,6 +1051,102 @@ def _tts_with_retry(tts, text: str, temp_dir: str, chapter_idx: int, chunk_idx: 
             return []
 
 
+def _combine_segments_to_file(
+    audio_segments: List[str],
+    output_file: str,
+    output_format: str,
+    crossfade_duration: int,
+    pause_stretch: float,
+    temp_dir: str,
+) -> bool:
+    """
+    Combines audio segment WAV files into a single output file.
+
+    Processes segments in batches of COMBINE_BATCH_SIZE to limit peak memory.
+    Each batch is flushed to a temp WAV file, then all batches are joined using
+    ffmpeg's concat demuxer (which streams without loading into memory).
+
+    Returns True if output file was created, False otherwise.
+    """
+    batch_files = []
+    combined = None
+    segments_in_batch = 0
+
+    for segment_file in audio_segments:
+        if not os.path.exists(segment_file):
+            continue
+
+        segment = AudioSegment.from_wav(segment_file)
+
+        if pause_stretch > 1.0:
+            segment = stretch_pauses(segment, factor=pause_stretch)
+
+        if combined is None:
+            combined = segment
+        else:
+            if crossfade_duration > 0:
+                micro = 5
+                combined = combined.fade_out(micro)
+                segment = segment.fade_in(micro)
+                combined = combined + segment
+            else:
+                combined += segment
+
+        segments_in_batch += 1
+
+        # Flush batch to disk to cap memory usage
+        if segments_in_batch >= COMBINE_BATCH_SIZE:
+            batch_path = os.path.join(temp_dir, f"_batch_{len(batch_files):03d}.wav")
+            combined.export(batch_path, format="wav")
+            batch_files.append(batch_path)
+            combined = None
+            segments_in_batch = 0
+
+    # Flush remaining segments
+    if combined is not None:
+        if not batch_files:
+            # Everything fit in one batch — export directly, no temp files needed
+            if output_format == "mp3":
+                combined.export(output_file, format="mp3", bitrate="192k")
+            else:
+                combined.export(output_file, format="wav")
+            return True
+        batch_path = os.path.join(temp_dir, f"_batch_{len(batch_files):03d}.wav")
+        combined.export(batch_path, format="wav")
+        batch_files.append(batch_path)
+        del combined
+
+    if not batch_files:
+        return False
+
+    # Merge batch files using ffmpeg concat demuxer (streams, no full load into memory)
+    concat_list_path = os.path.join(temp_dir, "_concat_list.txt")
+    try:
+        with open(concat_list_path, 'w') as f:
+            for fpath in batch_files:
+                abs_path = os.path.abspath(fpath)
+                escaped = abs_path.replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+
+        cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list_path]
+        if output_format == "mp3":
+            cmd.extend(['-b:a', '192k'])
+        cmd.append(output_file)
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]ffmpeg concat failed: {result.stderr[:500]}[/red]")
+            return False
+    finally:
+        for batch_path in batch_files:
+            if os.path.exists(batch_path):
+                os.remove(batch_path)
+        if os.path.exists(concat_list_path):
+            os.remove(concat_list_path)
+
+    return os.path.exists(output_file)
+
+
 def generate_chapter_audio(
     tts: TTS,
     chapter: dict,
@@ -1176,6 +1272,17 @@ def generate_chapter_audio(
 
             progress.update(task, advance=1)
 
+    # If resuming and no new segments were generated, recover existing temp files
+    if not audio_segments and start_chunk > 0:
+        heading_file = os.path.join(temp_dir, f"chapter_{chapter_idx:03d}_heading.wav")
+        if os.path.exists(heading_file):
+            audio_segments.append(heading_file)
+        existing = sorted(glob.glob(os.path.join(temp_dir, f"chapter_{chapter_idx:03d}_chunk_*.wav")))
+        if existing:
+            audio_segments.extend(existing)
+        if audio_segments:
+            console.print(f"   Recovered {len(audio_segments)} existing chunk files from temp")
+
     # Combine all chunks into one file
     if audio_segments:
         if book_metadata:
@@ -1191,40 +1298,24 @@ def generate_chapter_audio(
                 f"{chapter_idx + 1:02d}_{title}.{OUTPUT_FORMAT}"
             )
 
-        console.print(f"   Combining chunks...")
-        combined = None
+        console.print(f"   Combining {len(audio_segments)} chunks...")
+        success = _combine_segments_to_file(
+            audio_segments=audio_segments,
+            output_file=output_file,
+            output_format=OUTPUT_FORMAT,
+            crossfade_duration=crossfade_duration,
+            pause_stretch=pause_stretch,
+            temp_dir=temp_dir,
+        )
 
-        for seg_idx, segment_file in enumerate(audio_segments):
-            if os.path.exists(segment_file):
-                segment = AudioSegment.from_wav(segment_file)
-
-                # Stretch pauses between words/phrases
-                if pause_stretch > 1.0:
-                    segment = stretch_pauses(segment, factor=pause_stretch)
-
-                if combined is None:
-                    combined = segment
-                else:
-                    if crossfade_duration > 0:
-                        # Micro-fades only to prevent clicks at join seams.
-                        # Natural pauses are already in the chunks themselves.
-                        micro = 5
-                        combined = combined.fade_out(micro)
-                        segment = segment.fade_in(micro)
-                        combined = combined + segment
-                    else:
-                        combined += segment
-
-        # Export
-        if OUTPUT_FORMAT == "mp3":
-            combined.export(output_file, format="mp3", bitrate="192k")
-        else:
-            combined.export(output_file, format="wav")
-
-        # Clean up temporary files
+        # Clean up temporary chunk files
         for segment_file in audio_segments:
             if os.path.exists(segment_file):
                 os.remove(segment_file)
+
+        if not success:
+            console.print(f"   [red]Failed to combine chunks[/red]")
+            return None
 
         # Post-process to remove artifacts
         if postprocessor is not None:
