@@ -57,6 +57,61 @@ def parse_markdown_chapters(markdown_text: str) -> list:
     return chapters
 
 
+def _title_from_filename(filename: str) -> str:
+    """Derive a chapter title from a filename like '01_intro.md' → 'intro'."""
+    stem = filename.rsplit('.', 1)[0]  # remove extension
+    # Strip leading numeric prefix (e.g. "01_", "03-")
+    stem = re.sub(r'^\d+[_\-\s]*', '', stem)
+    # Replace underscores and hyphens with spaces
+    stem = stem.replace('_', ' ').replace('-', ' ')
+    return stem.strip() or filename
+
+
+def load_chapters_from_md_folder(folder_path: str) -> list:
+    """
+    Load .md files from a folder, each file becoming one chapter.
+
+    Files are sorted alphabetically (use numeric prefixes to control order).
+    Title is taken from the first # heading, or derived from the filename.
+
+    Returns list of dicts: [{"title": "...", "content": "..."}, ...]
+    """
+    import os
+    import glob as glob_mod
+
+    if not os.path.isdir(folder_path):
+        raise FileNotFoundError(f"Folder not found: {folder_path}")
+
+    md_files = sorted(glob_mod.glob(os.path.join(folder_path, '*.md')))
+
+    chapters = []
+    for filepath in md_files:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            text = f.read()
+
+        if not text.strip():
+            continue
+
+        # Check for a leading # heading
+        match = re.match(r'^# ([^\n]+)\n?(.*)', text, re.DOTALL)
+        if match:
+            title = match.group(1).strip()
+            content = clean_text(match.group(2))
+        else:
+            title = _title_from_filename(os.path.basename(filepath))
+            content = clean_text(text)
+
+        if not content:
+            continue
+
+        chapters.append({
+            'title': title,
+            'content': content,
+        })
+
+    return chapters
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert Markdown with # headings to chapters JSON"

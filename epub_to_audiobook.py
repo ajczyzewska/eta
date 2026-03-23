@@ -46,6 +46,8 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from tts_optimizer import TTSOptimizer
 from audio_postprocessor import AudioPostprocessor
+from md_to_chapters import load_chapters_from_md_folder
+from interactive import run_wizard
 try:
     from TTS.api import TTS
 except ImportError:
@@ -1462,6 +1464,11 @@ def main():
         help="Path to chapters JSON file (alternative to EPUB input). Skips EPUB extraction and content filtering"
     )
     parser.add_argument(
+        "--md-folder",
+        default=None,
+        help="Path to folder with .md files (each file = one chapter, sorted alphabetically)"
+    )
+    parser.add_argument(
         "--title",
         default=None,
         help="Book title (used with --chapters-json instead of EPUB metadata)"
@@ -1484,11 +1491,25 @@ def main():
     )
     args = parser.parse_args()
 
-    # Validate input: need either epub_file or --chapters-json
-    if not args.epub_file and not args.chapters_json:
-        parser.error("Provide either an EPUB file or --chapters-json <path>")
-    if args.epub_file and args.chapters_json:
-        parser.error("Cannot use both EPUB file and --chapters-json at the same time")
+    # No args at all? Launch interactive wizard
+    if not args.epub_file and not args.chapters_json and not args.md_folder:
+        config = run_wizard()
+        if config["input_type"] == "epub":
+            args.epub_file = config["path"]
+        elif config["input_type"] == "md_folder":
+            args.md_folder = config["path"]
+            if not args.title:
+                args.title = config.get("title")
+            if not args.author:
+                args.author = config.get("author")
+        elif config["input_type"] == "generate":
+            console.print(f"[yellow]Run generatebook.sh with prompts from: {config['path']}[/yellow]")
+            sys.exit(0)
+
+    # Validate: exactly one input source
+    inputs = [args.epub_file, args.chapters_json, args.md_folder]
+    if sum(1 for x in inputs if x) != 1:
+        parser.error("Provide exactly one of: EPUB file, --chapters-json, or --md-folder")
 
     # Speed parameter validation
     if args.speed < 0.5 or args.speed > 2.0:
@@ -1550,6 +1571,37 @@ def main():
 
         if not chapters:
             console.print("[red]Error: No chapters found in JSON file[/red]")
+            sys.exit(1)
+
+        console.print(f"   [green]✅ Found chapters to process: {len(chapters)}[/green]")
+        skipped = []
+    elif args.md_folder:
+        # Markdown folder input — each .md file is a chapter
+        if not os.path.isdir(args.md_folder):
+            console.print(f"[red]Error: Folder does not exist: {args.md_folder}[/red]")
+            sys.exit(1)
+
+        if args.output:
+            output_dir = args.output
+        else:
+            folder_name = Path(args.md_folder).name
+            output_dir = f"{folder_name}_audio"
+
+        metadata = {
+            'title': args.title or 'Unknown title',
+            'author': args.author or 'Unknown author',
+            'tom': args.tom,
+            'series': args.series,
+        }
+
+        console.print(f"\n[bold yellow]📝 Loading chapters from markdown folder: {args.md_folder}[/bold yellow]")
+        console.print(f"   [cyan]Title:[/cyan] {metadata['title']}")
+        console.print(f"   [cyan]Author:[/cyan] {metadata['author']}")
+
+        chapters = load_chapters_from_md_folder(args.md_folder)
+
+        if not chapters:
+            console.print("[red]Error: No .md files with content found in folder[/red]")
             sys.exit(1)
 
         console.print(f"   [green]✅ Found chapters to process: {len(chapters)}[/green]")
