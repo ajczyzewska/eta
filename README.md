@@ -56,13 +56,55 @@ Place a WAV file with a voice sample (10-30 seconds) in the project directory as
 
 ## Usage
 
-### Basic
+### Interactive mode (recommended)
+
+Run with no arguments to launch the guided wizard:
+
+```bash
+python epub_to_audiobook.py
+```
+
+The wizard asks what you want to convert:
+
+```
+EtA — Text to Audiobook
+
+What would you like to convert?
+
+  [1] EPUB file
+  [2] Markdown folder (each .md = one chapter)
+  [3] Generate book from prompt
+```
+
+Then prompts for the path and any relevant settings.
+
+### Direct mode (scripting / automation)
+
+#### From an EPUB file
 
 ```bash
 python epub_to_audiobook.py your_book.epub
 ```
 
-### With custom voice
+#### From a folder of Markdown files
+
+Each `.md` file in the folder becomes one chapter. Files are processed in alphabetical order — use numeric prefixes to control ordering:
+
+```
+my_book/
+├── 01_introduction.md
+├── 02_chapter_one.md
+├── 03_chapter_two.md
+└── ...
+```
+
+```bash
+python epub_to_audiobook.py --md-folder my_book/ --title "My Book" --author "Author Name"
+```
+
+The chapter title is taken from the first `# ` heading in the file. If no heading is present, it is derived from the filename (`01_intro.md` → "intro").
+
+#### With custom voice
 
 ```bash
 python epub_to_audiobook.py book.epub --speaker my_voice.wav
@@ -106,9 +148,13 @@ python epub_to_audiobook.py book.epub --resume
 
 | Parameter | Description | Default |
 |----------|------|-----------|
-| `epub_file` | Path to EPUB file | (required) |
+| `epub_file` | Path to EPUB file | — |
+| `--md-folder` | Path to folder with `.md` files (each file = one chapter) | — |
+| `--chapters-json` | Path to pre-extracted chapters JSON file | — |
 | `--speaker` | WAV file with voice sample | sample-agent.wav |
 | `--output` | Output directory | book_name_audio |
+| `--title` | Book title (used with `--md-folder` or `--chapters-json`) | Unknown title |
+| `--author` | Book author (used with `--md-folder` or `--chapters-json`) | Unknown author |
 | `--chunk-size` | Chunk size (characters) | 300 |
 | `--crossfade` | Crossfade in ms (0=disable) | 100 |
 | `--speed` | Speech speed (0.5-2.0) | 1.0 |
