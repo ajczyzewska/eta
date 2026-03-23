@@ -46,6 +46,7 @@ Thumbs.db
 .checkpoint.json
 temp/
 uploads/
+generated_books/
 
 # UI runtime files
 ui/state.json
@@ -53,3 +54,4 @@ ui/run.log
 
 # Logs
 *.log
+blogpost.md

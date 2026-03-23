@@ -36,6 +36,8 @@ import multiprocessing
 import psutil
 import pysbd
 
+import unicodedata
+
 import ebooklib
 from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub
@@ -613,6 +615,44 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'\s+', '_', name)
     # Limit length
     return name[:50]
+
+
+_CHAR_MAP = {'ł': 'l', 'Ł': 'L', 'đ': 'd', 'Đ': 'D', 'ø': 'o', 'Ø': 'O', 'ß': 'ss'}
+
+
+def to_camel_case_ascii(name: str) -> str:
+    """Converts a string to PascalCase with diacritics stripped.
+
+    Example: 'Noc nad Wisłą' -> 'NocNadWisla'
+    """
+    # Replace characters that don't decompose via NFD
+    name = ''.join(_CHAR_MAP.get(c, c) for c in name)
+    # Strip diacritics: normalize to NFD, remove combining marks
+    nfkd = unicodedata.normalize('NFKD', name)
+    ascii_str = ''.join(c for c in nfkd if not unicodedata.combining(c))
+    # Remove non-alphanumeric characters except spaces
+    ascii_str = re.sub(r'[^a-zA-Z0-9\s]', '', ascii_str)
+    # PascalCase each word
+    return ''.join(word.capitalize() for word in ascii_str.split())
+
+
+def _build_mp3_filename(metadata: dict, chapter_num: int, fmt: str) -> str:
+    """Builds MP3 filename in format: T{tom}_R{chapter}_{series}_{title}_{author}.{fmt}
+
+    Falls back gracefully when tom/series are not provided.
+    Example: T3_R1_NocNadWisla_RodDebickich_StanislawModrzejewski.mp3
+    """
+    parts = []
+    tom = metadata.get('tom')
+    if tom is not None:
+        parts.append(f"T{tom}")
+    parts.append(f"R{chapter_num}")
+    series = metadata.get('series')
+    if series:
+        parts.append(to_camel_case_ascii(series))
+    parts.append(to_camel_case_ascii(metadata.get('title', 'Unknown')))
+    parts.append(to_camel_case_ascii(metadata.get('author', 'Unknown')))
+    return '_'.join(parts) + f".{fmt}"
 
 
 # Polish abbreviations that pySBD may incorrectly split on
@@ -1286,11 +1326,9 @@ def generate_chapter_audio(
     # Combine all chunks into one file
     if audio_segments:
         if book_metadata:
-            book_title = sanitize_filename(book_metadata.get('title', 'Unknown'))
-            book_author = sanitize_filename(book_metadata.get('author', 'Unknown'))
             output_file = os.path.join(
                 output_dir,
-                f"{book_title}_{book_author}_{chapter_idx + 1:02d}.{OUTPUT_FORMAT}"
+                _build_mp3_filename(book_metadata, chapter_idx + 1, OUTPUT_FORMAT)
             )
         else:
             output_file = os.path.join(
@@ -1362,7 +1400,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Converts EPUB to audiobook using XTTS v2"
     )
-    parser.add_argument("epub_file", help="Path to EPUB file")
+    parser.add_argument("epub_file", nargs='?', default=None, help="Path to EPUB file")
     parser.add_argument(
         "--speaker",
         default=None,
@@ -1418,7 +1456,39 @@ def main():
         action="store_true",
         help="Apply audio post-processing to remove artifacts (requires FFmpeg)"
     )
+    parser.add_argument(
+        "--chapters-json",
+        default=None,
+        help="Path to chapters JSON file (alternative to EPUB input). Skips EPUB extraction and content filtering"
+    )
+    parser.add_argument(
+        "--title",
+        default=None,
+        help="Book title (used with --chapters-json instead of EPUB metadata)"
+    )
+    parser.add_argument(
+        "--author",
+        default=None,
+        help="Book author (used with --chapters-json instead of EPUB metadata)"
+    )
+    parser.add_argument(
+        "--tom",
+        type=int,
+        default=None,
+        help="Volume/tom number for MP3 naming (e.g. 3 produces T3 prefix)"
+    )
+    parser.add_argument(
+        "--series",
+        default=None,
+        help="Series name for MP3 naming (e.g. 'Ród Dębickich')"
+    )
     args = parser.parse_args()
+
+    # Validate input: need either epub_file or --chapters-json
+    if not args.epub_file and not args.chapters_json:
+        parser.error("Provide either an EPUB file or --chapters-json <path>")
+    if args.epub_file and args.chapters_json:
+        parser.error("Cannot use both EPUB file and --chapters-json at the same time")
 
     # Speed parameter validation
     if args.speed < 0.5 or args.speed > 2.0:
@@ -1447,17 +1517,78 @@ def main():
             args.chunk_size = optimization_profile['chunk_size']
             console.print(f"   Chunk size: {args.chunk_size} characters")
 
-    # Check EPUB file
-    if not os.path.exists(args.epub_file):
-        console.print(f"[red]Error: File does not exist: {args.epub_file}[/red]")
-        sys.exit(1)
+    # Determine input source and set up accordingly
+    if args.chapters_json:
+        # JSON chapters input — skip EPUB extraction and content filtering
+        if not os.path.exists(args.chapters_json):
+            console.print(f"[red]Error: File does not exist: {args.chapters_json}[/red]")
+            sys.exit(1)
 
-    # Set output directory
-    if args.output:
-        output_dir = args.output
+        if args.output:
+            output_dir = args.output
+        else:
+            book_name = Path(args.chapters_json).stem
+            output_dir = f"{book_name}_audio"
+
+        metadata = {
+            'title': args.title or 'Unknown title',
+            'author': args.author or 'Unknown author',
+            'tom': args.tom,
+            'series': args.series,
+        }
+
+        console.print(f"\n[bold yellow]📚 Loading chapters from JSON: {args.chapters_json}[/bold yellow]")
+        console.print(f"   [cyan]Title:[/cyan] {metadata['title']}")
+        console.print(f"   [cyan]Author:[/cyan] {metadata['author']}")
+
+        try:
+            with open(args.chapters_json, 'r', encoding='utf-8') as f:
+                chapters = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            console.print(f"[red]Error loading chapters JSON: {e}[/red]")
+            sys.exit(1)
+
+        if not chapters:
+            console.print("[red]Error: No chapters found in JSON file[/red]")
+            sys.exit(1)
+
+        console.print(f"   [green]✅ Found chapters to process: {len(chapters)}[/green]")
+        skipped = []
     else:
-        book_name = Path(args.epub_file).stem
-        output_dir = f"{book_name}_audio"
+        # EPUB input — original flow
+        if not os.path.exists(args.epub_file):
+            console.print(f"[red]Error: File does not exist: {args.epub_file}[/red]")
+            sys.exit(1)
+
+        if args.output:
+            output_dir = args.output
+        else:
+            book_name = Path(args.epub_file).stem
+            output_dir = f"{book_name}_audio"
+
+        # Extract metadata
+        console.print(f"\n[bold yellow]📚 Loading EPUB: {args.epub_file}[/bold yellow]")
+        metadata = extract_metadata(args.epub_file)
+        metadata['tom'] = args.tom
+        metadata['series'] = args.series
+        # CLI overrides for title/author
+        if args.title:
+            metadata['title'] = args.title
+        if args.author:
+            metadata['author'] = args.author
+        console.print(f"   [cyan]Title:[/cyan] {metadata['title']}")
+        console.print(f"   [cyan]Author:[/cyan] {metadata['author']}")
+
+        # Extract chapters
+        console.print(f"\n[bold yellow]🔍 Analyzing chapters...[/bold yellow]")
+        chapters, skipped = extract_chapters_from_epub(args.epub_file, verbose=args.verbose)
+
+        if not chapters:
+            console.print("[red]Error: No chapters found in EPUB file[/red]")
+            console.print("[yellow]Check if the file contains proper book chapters.[/yellow]")
+            sys.exit(1)
+
+        console.print(f"   [green]✅ Found chapters to process: {len(chapters)}[/green]")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1485,23 +1616,6 @@ def main():
         console.print(f"[yellow]Resuming from chapter {checkpoint['current_chapter'] + 1}[/yellow]")
     else:
         checkpoint = {'completed_chapters': [], 'current_chapter': 0, 'current_chunk': 0}
-
-    # Extract metadata
-    console.print(f"\n[bold yellow]📚 Loading EPUB: {args.epub_file}[/bold yellow]")
-    metadata = extract_metadata(args.epub_file)
-    console.print(f"   [cyan]Title:[/cyan] {metadata['title']}")
-    console.print(f"   [cyan]Author:[/cyan] {metadata['author']}")
-
-    # Extract chapters
-    console.print(f"\n[bold yellow]🔍 Analyzing chapters...[/bold yellow]")
-    chapters, skipped = extract_chapters_from_epub(args.epub_file, verbose=args.verbose)
-
-    if not chapters:
-        console.print("[red]Error: No chapters found in EPUB file[/red]")
-        console.print("[yellow]Check if the file contains proper book chapters.[/yellow]")
-        sys.exit(1)
-
-    console.print(f"   [green]✅ Found chapters to process: {len(chapters)}[/green]")
 
     if skipped:
         console.print(f"   [dim]Skipped elements: {len(skipped)}[/dim]")
@@ -1567,7 +1681,7 @@ def main():
             console.print(f"[red]Error: {e}[/red]")
             sys.exit(1)
     # Generate book intro (title + author) as the first audio file
-    intro_file = os.path.join(output_dir, "00_intro." + OUTPUT_FORMAT)
+    intro_file = os.path.join(output_dir, _build_mp3_filename(metadata, 0, OUTPUT_FORMAT))
     if not args.resume and not os.path.exists(intro_file):
         console.print(f"\n[bold yellow]🎙️ Generating book intro...[/bold yellow]")
         try:

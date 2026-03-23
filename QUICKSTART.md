@@ -94,6 +94,78 @@ python epub_to_audiobook.py książka.epub --verbose
 python epub_to_audiobook.py książka.epub --resume
 ```
 
+## 📖 Generowanie audiobooka od zera (z promptów AI)
+
+Możesz wygenerować całą książkę — tekst + audio — używając `generatebook.sh` i katalogu z promptami.
+
+### Struktura promptów
+
+```
+book_prompts/
+├── book.md       # Specyfikacja książki (tytuł, bohaterowie, streszczenie)
+├── outline.md    # Zarys rozdziałów (## Rozdział 1: Tytuł + opis)
+├── rules.md      # Reguły dla AI (styl, format, ograniczenia)
+└── style.md      # (opcjonalnie) Próbka stylu / dodatkowe wytyczne
+```
+
+### Generowanie
+
+```bash
+sh generatebook.sh --name "moja-ksiazka" \
+  --speaker speaker.wav --optimize auto --postprocess --chunk-size 230
+```
+
+Skrypt robi trzy rzeczy automatycznie:
+1. Generuje tekst rozdziałów przez Claude (z review i streszczeniami)
+2. Konwertuje `book.md` → `chapters.json`
+3. Odpala pipeline TTS → pliki MP3
+
+### Przydatne flagi
+
+```bash
+# Użyj innego katalogu z promptami (np. dla tomu 2)
+sh generatebook.sh --name "rod-debickich-t2" --prompts-dir ./book_prompts_t2/
+
+# Pomiń generowanie tekstu (masz już book.md)
+sh generatebook.sh --name "moja-ksiazka" --skip-generate \
+  --speaker speaker.wav --optimize auto --postprocess
+
+# Pomiń konwersję (masz już chapters.json)
+sh generatebook.sh --name "moja-ksiazka" --skip-convert \
+  --speaker speaker.wav --optimize auto --postprocess
+```
+
+### Multi-tom
+
+Jeśli masz wiele tomów, stwórz osobny katalog promptów per tom:
+
+```bash
+mkdir -p book_prompts_t2
+cp book_prompts/rules.md book_prompts/style.md book_prompts_t2/
+cp book_prompts/book-t2.md book_prompts_t2/book.md
+cp book_prompts/outline-t2.md book_prompts_t2/outline.md
+
+sh generatebook.sh --name "rod-debickich-t2" --prompts-dir ./book_prompts_t2/ \
+  --speaker speaker.wav --optimize auto --postprocess --chunk-size 230
+```
+
+### Wynik
+
+```
+generated_books/moja-ksiazka_2026-03-16/
+├── chapter_1.md          # Tekst rozdziałów
+├── chapter_2.md
+├── ...
+├── summary_1.txt         # Streszczenia (dla ciągłości)
+├── review_1.txt          # Wyniki review AI
+├── book.md               # Cała książka
+├── chapters.json         # JSON dla TTS
+└── audio/
+    ├── 01_Rozdzial_1.mp3
+    ├── 02_Rozdzial_2.mp3
+    └── ...
+```
+
 ## 📚 Więcej info
 
 - Pełna dokumentacja: [README.md](README.md)
