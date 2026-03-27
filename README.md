@@ -160,6 +160,8 @@ python epub_to_audiobook.py book.epub --resume
 | `--speed` | Speech speed (0.5-2.0) | 1.0 |
 | `--pause-stretch` | Stretch pauses between words (1.0=normal, 1.5=50% longer) | 1.0 |
 | `--optimize` | Optimization profile (auto/speed/balanced/quality/off) | off |
+| `--tom` | Volume number for MP3 naming (e.g. `3` produces `T3` prefix) | — |
+| `--series` | Series name for MP3 naming (e.g. `Ród Dębickich`) | — |
 | `--postprocess` | Apply audio post-processing to remove artifacts (requires FFmpeg) | false |
 | `--resume` | Resume from checkpoint | false |
 | `--verbose` | Show details | false |

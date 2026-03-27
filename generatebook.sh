@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
             SKIP_GENERATE=true; shift ;;
         --skip-convert)
             SKIP_CONVERT=true; shift ;;
-        --speaker|--output|--chunk-size|--crossfade|--speed|--pause-stretch|--optimize)
+        --speaker|--output|--chunk-size|--crossfade|--speed|--pause-stretch|--optimize|--tom|--series)
             TTS_ARGS+=("$1" "$2"); shift 2 ;;
         --postprocess|--resume|--verbose)
             TTS_ARGS+=("$1"); shift ;;
@@ -296,6 +296,43 @@ BOOK_AUTHOR=${BOOK_AUTHOR:-AI}
 echo ">>> Phase 3: Running TTS pipeline..."
 echo "  Title: $BOOK_TITLE"
 echo "  Author: $BOOK_AUTHOR"
+
+# Auto-extract tom number and series from title if not already in TTS_ARGS
+# Matches patterns like "Ród Dębickich — Tom V: ..." or "Saga — Tom 3: ..."
+TTS_ARGS_STR="${TTS_ARGS[*]:-}"
+if [[ ! "$TTS_ARGS_STR" =~ "--tom" ]]; then
+    # Extract Roman or Arabic tom number from title
+    TOM_NUM=$(echo "$BOOK_TITLE" | sed -n 's/.*[Tt]om[[:space:]]*\([IVXLC]*[0-9]*\).*/\1/p' | head -1)
+    if [[ -n "$TOM_NUM" ]]; then
+        # Convert Roman numerals to Arabic
+        case "$TOM_NUM" in
+            I) TOM_NUM=1 ;; II) TOM_NUM=2 ;; III) TOM_NUM=3 ;; IV) TOM_NUM=4 ;;
+            V) TOM_NUM=5 ;; VI) TOM_NUM=6 ;; VII) TOM_NUM=7 ;; VIII) TOM_NUM=8 ;;
+            IX) TOM_NUM=9 ;; X) TOM_NUM=10 ;;
+        esac
+        if [[ "$TOM_NUM" =~ ^[0-9]+$ ]]; then
+            echo "  Tom: $TOM_NUM (auto-detected)"
+            TTS_ARGS+=("--tom" "$TOM_NUM")
+        fi
+    fi
+fi
+
+if [[ ! "$TTS_ARGS_STR" =~ "--series" ]]; then
+    # Extract series name (text before " — Tom" or " - Tom")
+    SERIES_NAME=$(echo "$BOOK_TITLE" | sed -n 's/\(.*\)[[:space:]]*[—–-][[:space:]]*[Tt]om.*/\1/p' | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [[ -n "$SERIES_NAME" ]]; then
+        echo "  Series: $SERIES_NAME (auto-detected)"
+        TTS_ARGS+=("--series" "$SERIES_NAME")
+    fi
+fi
+
+# Extract subtitle (text after "Tom N: ...") to use as the actual title
+SUBTITLE=$(echo "$BOOK_TITLE" | sed -n 's/.*[Tt]om[[:space:]]*[IVXLC0-9]*:[[:space:]]*\(.*\)/\1/p' | head -1)
+if [[ -n "$SUBTITLE" ]]; then
+    BOOK_TITLE="$SUBTITLE"
+    echo "  Subtitle: $BOOK_TITLE (used as title)"
+fi
+
 echo ""
 
 $PYTHON "$SCRIPT_DIR/epub_to_audiobook.py" \

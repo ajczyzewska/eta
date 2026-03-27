@@ -133,7 +133,15 @@ sh generatebook.sh --name "moja-ksiazka" --skip-generate \
 # Pomiń konwersję (masz już chapters.json)
 sh generatebook.sh --name "moja-ksiazka" --skip-convert \
   --speaker speaker.wav --optimize auto --postprocess
+
+# Ręcznie podaj numer tomu i serię (jeśli auto-detekcja nie działa)
+sh generatebook.sh --name "moja-ksiazka" --tom 3 --series "Moja Seria" \
+  --speaker speaker.wav --optimize auto --postprocess
 ```
+
+> **Auto-detekcja tomu i serii:** Jeśli tytuł w `book.md` ma format `Seria — Tom V: Tytuł`,
+> skrypt automatycznie wyciągnie numer tomu (Roman i arabski), nazwę serii i podtytuł.
+> Flagi `--tom` i `--series` nadpisują auto-detekcję.
 
 ### Multi-tom
 

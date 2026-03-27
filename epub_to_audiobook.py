@@ -56,6 +56,11 @@ except ImportError:
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import logging
+logging.getLogger("TTS").setLevel(logging.WARNING)
+logging.getLogger("TTS.tts").setLevel(logging.WARNING)
+logging.getLogger("TTS.utils").setLevel(logging.WARNING)
+
 console = Console()
 
 # Configuration
