@@ -18,7 +18,10 @@ PROMPTS_DIR="./book_prompts"
 BOOK_NAME=""
 SKIP_GENERATE=false
 SKIP_CONVERT=false
+DEPLOY=false
 TTS_ARGS=()
+SERIES_NAME=""
+TOM_NUM=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ─── Parse arguments ─────────────────────────────────────────
@@ -36,6 +39,8 @@ while [[ $# -gt 0 ]]; do
             TTS_ARGS+=("$1" "$2"); shift 2 ;;
         --postprocess|--resume|--verbose)
             TTS_ARGS+=("$1"); shift ;;
+        --deploy)
+            DEPLOY=true; shift ;;
         -h|--help)
             echo "Usage: sh generatebook.sh --name <book-name> [options]"
             echo ""
@@ -47,6 +52,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --speaker <wav>         Voice sample WAV file (passed to TTS)"
             echo "  --chunk-size <n>        TTS chunk size (passed to TTS)"
             echo "  --postprocess           Apply audio post-processing (passed to TTS)"
+            echo "  --deploy                Deploy audio to server after generation (calls deploy.sh)"
             echo "  -h, --help              Show this help"
             exit 0 ;;
         *)
@@ -342,9 +348,46 @@ $PYTHON "$SCRIPT_DIR/epub_to_audiobook.py" \
     --output "$OUTPUT_DIR/audio" \
     "${TTS_ARGS[@]}"
 
+# ─── DEPLOY ───────────────────────────────────────────────────
+if [[ "$DEPLOY" == true ]]; then
+    echo ""
+    echo ">>> Deploying to server..."
+    # If user passed --tom/--series via TTS args (auto-detection was skipped),
+    # extract those values so they appear in the deployed meta.json
+    if [[ -z "$TOM_NUM" ]]; then
+        i=0
+        while [[ $i -lt ${#TTS_ARGS[@]} ]]; do
+            if [[ "${TTS_ARGS[$i]}" == "--tom" ]]; then
+                next_i=$(( i + 1 ))
+                TOM_NUM="${TTS_ARGS[$next_i]:-}"; break
+            fi
+            i=$(( i + 1 ))
+        done
+    fi
+    if [[ -z "$SERIES_NAME" ]]; then
+        i=0
+        while [[ $i -lt ${#TTS_ARGS[@]} ]]; do
+            if [[ "${TTS_ARGS[$i]}" == "--series" ]]; then
+                next_i=$(( i + 1 ))
+                SERIES_NAME="${TTS_ARGS[$next_i]:-}"; break
+            fi
+            i=$(( i + 1 ))
+        done
+    fi
+    DEPLOY_ARGS=()
+    [[ -n "$SERIES_NAME" ]] && DEPLOY_ARGS+=("--series" "$SERIES_NAME")
+    [[ -n "$TOM_NUM" ]]     && DEPLOY_ARGS+=("--tom" "$TOM_NUM")
+    "$SCRIPT_DIR/deploy.sh" "$OUTPUT_DIR/audio" \
+        --name "$BOOK_NAME" \
+        --title "$BOOK_TITLE" \
+        --author "$BOOK_AUTHOR" \
+        "${DEPLOY_ARGS[@]}"
+fi
+
 echo ""
 echo "======================================"
 echo "  Done!"
 echo "  Book: $OUTPUT_DIR/book.md"
 echo "  Audio: $OUTPUT_DIR/audio/"
+[[ "$DEPLOY" == true ]] && echo "  Deployed to server."
 echo "======================================"

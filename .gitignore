@@ -51,6 +51,7 @@ generated_books/
 # UI runtime files
 ui/state.json
 ui/run.log
+pwa/node_modules
 
 # Logs
 *.log

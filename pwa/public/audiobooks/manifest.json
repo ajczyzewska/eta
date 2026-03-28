@@ -1,0 +1,31 @@
+{
+  "books": [
+    {
+      "slug": "rod-debickich-t1",
+      "title": "Krew i honor",
+      "author": "Stanisław Modrzejewski",
+      "series": "Ród Dębickich",
+      "tom": 1,
+      "generated_at": "2026-03-28T00:00:00Z",
+      "chapters": [
+        { "index": 0, "filename": "R0_intro.mp3", "label": "Wprowadzenie" },
+        { "index": 1, "filename": "R1_ch1.mp3", "label": "Rozdział 1: Cień przeszłości" },
+        { "index": 2, "filename": "R2_ch2.mp3", "label": "Rozdział 2: Żelazny koń" },
+        { "index": 3, "filename": "R3_ch3.mp3", "label": "Rozdział 3: Burza na horyzoncie" }
+      ]
+    },
+    {
+      "slug": "rod-debickich-t2",
+      "title": "Ogień i stal",
+      "author": "Stanisław Modrzejewski",
+      "series": "Ród Dębickich",
+      "tom": 2,
+      "generated_at": "2026-03-28T00:00:00Z",
+      "chapters": [
+        { "index": 0, "filename": "R0_intro.mp3", "label": "Wprowadzenie" },
+        { "index": 1, "filename": "R1_ch1.mp3", "label": "Rozdział 1: Nowe czasy" },
+        { "index": 2, "filename": "R2_ch2.mp3", "label": "Rozdział 2: Powrót syna" }
+      ]
+    }
+  ]
+}

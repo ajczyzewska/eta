@@ -1,0 +1,11 @@
+{
+  "name": "Audiobook Player",
+  "short_name": "Player",
+  "description": "Tablet audiobook player for generated books",
+  "display": "standalone",
+  "orientation": "any",
+  "start_url": "/player/",
+  "background_color": "#1a1a2e",
+  "theme_color": "#16213e",
+  "icons": []
+}

@@ -1,0 +1,16 @@
+{
+  "name": "eta-audiobook-player",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && rsync -av --delete dist/ ${SSH_USER:-eta}@${SSH_HOST:-mydevil.net}:/srv/player/"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3",
+    "vite": "^5.4.0"
+  }
+}
